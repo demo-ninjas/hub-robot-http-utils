@@ -1,0 +1,20 @@
+{
+    "name": "hub-robot-http-utils",
+    "description": "Library to support using serving or consuming HTTP on your Robot",
+    "version": "0.1.1",
+    "dependencies": {
+        "hub-robot-core": "git@github.com:demo-ninjas/hub-robot-core.git"
+    },
+    "authors": [
+        {
+            "name": "Adam Strickland",
+            "email": "astrickland@microsoft.com"
+        }
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/demo-ninjas/hub-robot-http-utils"
+    },
+    "frameworks": ["arduino"],
+    "platforms": ["espressif32"]
+}
