@@ -3,7 +3,7 @@
     "description": "Library to support using serving or consuming HTTP on your Robot",
     "version": "0.1.1",
     "dependencies": {
-        "hub-robot-core": "git@github.com:demo-ninjas/hub-robot-core.git"
+        "hub-robot-core": "https://github.com/demo-ninjas/hub-robot-core.git"
     },
     "authors": [
         {
