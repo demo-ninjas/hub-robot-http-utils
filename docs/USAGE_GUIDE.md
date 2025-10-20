@@ -22,13 +22,16 @@ A lightweight, memory-safe HTTP server library for ESP32 microcontrollers using 
 ✅ **Memory Safe** - Bounds checking, resource limits, automatic cleanup  
 ✅ **Efficient** - Optimized for microcontrollers with limited resources  
 ✅ **Modern API** - Clean, fluent interface with method chaining  
-✅ **Route Handling** - Simple path-based routing  
-✅ **Middleware Support** - Process all requests with custom logic  
+✅ **Route Handling** - Simple path-based routing with path parameters  
+✅ **Middleware Support** - Process all requests with custom logic and short-circuit capability  
 ✅ **CORS Support** - Built-in Cross-Origin Resource Sharing  
 ✅ **Error Handling** - Custom error handlers and automatic responses  
-✅ **Debug Logging** - Comprehensive logging support  
-✅ **Request Parsing** - Query parameters, headers, body parsing  
+✅ **Debug Logging** - Comprehensive logging support with built-in log endpoint  
+✅ **Request Parsing** - Query parameters, headers, body, and path parameters  
 ✅ **Response Helpers** - JSON, HTML, text, redirect helpers  
+✅ **Connection Management** - Keep-alive support, max connections, inactivity timeouts  
+✅ **Default Headers** - Automatic headers for all responses  
+✅ **Before-Send Hook** - Final processing before sending responses  
 
 ## Installation
 
@@ -109,10 +112,26 @@ HttpServer server;
 #### Configuration Methods
 
 ##### `void begin()`
-Start the HTTP server. Must be called after all configuration.
+Start the HTTP server with current settings. Must be called after all configuration.
 
 ```cpp
 server.begin();
+```
+
+#### `void begin(const HttpServerConfig &config)`
+Start the HTTP server with structured configuration.
+
+```cpp
+HttpServer::HttpServerConfig config;
+config.port = 8080;
+config.maxRequestSize = 4096;
+config.clientTimeout = 3000;
+config.connectionInactivityTimeout = 60000;
+config.maxConnections = 8;
+config.keepAlive = true;
+config.debug = true;
+
+server.begin(config);
 ```
 
 ##### `void stop()`
@@ -185,13 +204,36 @@ server.setClientTimeout(3000);  // 3 second timeout
 #### Routing Methods
 
 ##### `void on(const String &path, RouteHandler handler)`
-Register a route handler for a specific path.
+Register a route handler for a specific path (all HTTP methods).
 
 ```cpp
 server.on("/api/status", [](HttpRequest &req) {
     HttpResponse response;
     response.json("{\"status\":\"ok\"}");
     return response;
+});
+```
+
+##### `void on(const String &method, const String &path, RouteHandler handler)`
+Register a method-specific route handler with optional path parameters.
+
+```cpp
+// Path with parameters
+server.on("GET", "/api/user/:id", [](HttpRequest &req) {
+    String userId = req.params["id"];
+    return HttpResponse().json("{\"id\":\"" + userId + "\"}");
+});
+
+// Multiple parameters
+server.on("GET", "/api/post/:postId/comment/:commentId", [](HttpRequest &req) {
+    String postId = req.params["postId"];
+    String commentId = req.params["commentId"];
+    return HttpResponse().json("{\"post\":\"" + postId + "\",\"comment\":\"" + commentId + "\"}");
+});
+
+// Method-specific without parameters
+server.on("POST", "/api/data", [](HttpRequest &req) {
+    return HttpResponse().json("{\"status\":\"created\"}");
 });
 ```
 
@@ -220,7 +262,7 @@ server.onError([](int statusCode, const String &message) {
 #### Middleware
 
 ##### `void use(MiddlewareHandler middleware)`
-Register middleware that runs for all requests.
+Register legacy middleware that runs for all requests (always continues).
 
 ```cpp
 server.use([](HttpRequest &req, HttpResponse &response) {
@@ -230,6 +272,35 @@ server.use([](HttpRequest &req, HttpResponse &response) {
     
     // Add custom header to all responses
     response.setHeader("X-Powered-By", "ESP32");
+});
+```
+
+##### `void use(MiddlewareHandlerBool middleware)`
+Register short-circuit capable middleware that runs for all requests.
+
+```cpp
+// Authentication middleware
+server.use([](HttpRequest &req, HttpResponse &response) -> bool {
+    // Skip auth for public endpoints
+    if (req.path.startsWith("/public/")) {
+        return true;  // Continue
+    }
+    
+    if (!req.hasHeader("Authorization")) {
+        response.setStatus(401).text("Unauthorized");
+        return false;  // Stop processing, send 401
+    }
+    
+    return true;  // Continue to handler
+});
+
+// Rate limiting
+server.use([](HttpRequest &req, HttpResponse &response) -> bool {
+    if (isRateLimited(req)) {
+        response.setStatus(429).text("Too Many Requests");
+        return false;  // Stop
+    }
+    return true;
 });
 ```
 
@@ -288,6 +359,7 @@ String path;                          // Request path (e.g., "/api/data")
 String body;                          // Request body
 std::map<String, String> headers;     // HTTP headers
 std::map<String, String> query;       // Query parameters
+std::map<String, String> params;      // Path parameters from route patterns
 ```
 
 #### Methods
@@ -521,7 +593,48 @@ void loop() {
 }
 ```
 
-### Example 2: Query Parameters
+### Example 2: Path Parameters
+
+```cpp
+// Single parameter
+server.on("GET", "/api/user/:id", [](HttpRequest &req) {
+    String userId = req.params["id"];
+    
+    String json = "{\"id\":\"" + userId + "\",\"name\":\"User " + userId + "\"}";
+    return HttpResponse().json(json);
+});
+
+// Multiple parameters
+server.on("GET", "/api/post/:postId/comment/:commentId", [](HttpRequest &req) {
+    String postId = req.params["postId"];
+    String commentId = req.params["commentId"];
+    
+    String json = "{";
+    json += "\"postId\":\"" + postId + "\",";
+    json += "\"commentId\":\"" + commentId + "\"";
+    json += "}";
+    
+    return HttpResponse().json(json);
+});
+
+// Combine path parameters with query parameters
+server.on("GET", "/api/user/:id/posts", [](HttpRequest &req) {
+    String userId = req.params["id"];
+    int limit = req.getQueryParam("limit", "10").toInt();
+    int offset = req.getQueryParam("offset", "0").toInt();
+    
+    // GET /api/user/123/posts?limit=5&offset=10
+    String json = "{";
+    json += "\"userId\":\"" + userId + "\",";
+    json += "\"limit\":" + String(limit) + ",";
+    json += "\"offset\":" + String(offset);
+    json += "}";
+    
+    return HttpResponse().json(json);
+});
+```
+
+### Example 3: Query Parameters
 
 ```cpp
 server.on("/api/data", [](HttpRequest &req) {
@@ -547,7 +660,7 @@ server.on("/api/data", [](HttpRequest &req) {
 });
 ```
 
-### Example 3: Headers and Authentication
+### Example 4: Headers and Authentication
 
 ```cpp
 server.on("/api/secure", [](HttpRequest &req) {
@@ -568,7 +681,7 @@ server.on("/api/secure", [](HttpRequest &req) {
 });
 ```
 
-### Example 4: File-like Responses
+### Example 5: File-like Responses
 
 ```cpp
 server.on("/api/download", [](HttpRequest &req) {
@@ -583,7 +696,7 @@ server.on("/api/download", [](HttpRequest &req) {
 });
 ```
 
-### Example 5: Middleware for Logging
+### Example 6: Middleware for Logging
 
 ```cpp
 void setup() {
@@ -609,7 +722,52 @@ void setup() {
 }
 ```
 
-### Example 6: CORS for Web Apps
+### Example 7: Short-Circuit Middleware
+
+```cpp
+void setup() {
+    // Authentication middleware that can stop processing
+    server.use([](HttpRequest &req, HttpResponse &response) -> bool {
+        // Skip auth for public routes
+        if (req.path.startsWith("/public")) {
+            return true;  // Continue
+        }
+        
+        // Check auth header
+        String auth = req.getHeader("Authorization");
+        if (auth.isEmpty()) {
+            response.setStatus(401).text("Unauthorized");
+            return false;  // Stop - send 401 immediately
+        }
+        
+        // Validate token (simplified)
+        if (auth != "Bearer secret-token") {
+            response.setStatus(403).text("Forbidden");
+            return false;  // Stop - send 403
+        }
+        
+        return true;  // Continue to handler
+    });
+    
+    // Rate limiting middleware
+    unsigned long lastRequestTime = 0;
+    const unsigned long rateLimit = 1000;  // 1 request per second
+    
+    server.use([&](HttpRequest &req, HttpResponse &response) -> bool {
+        unsigned long now = millis();
+        if (now - lastRequestTime < rateLimit) {
+            response.setStatus(429).text("Too Many Requests");
+            return false;  // Stop
+        }
+        lastRequestTime = now;
+        return true;  // Continue
+    });
+    
+    server.begin();
+}
+```
+
+### Example 8: CORS for Web Apps
 
 ```cpp
 void setup() {
@@ -627,7 +785,7 @@ void setup() {
 }
 ```
 
-### Example 7: Custom 404 Handler
+### Example 9: Custom 404 Handler
 
 ```cpp
 void setup() {
@@ -652,7 +810,7 @@ void setup() {
 }
 ```
 
-### Example 8: Custom Error Handler
+### Example 10: Custom Error Handler
 
 ```cpp
 void setup() {
@@ -673,7 +831,7 @@ void setup() {
 }
 ```
 
-### Example 9: Built-in Log Endpoint
+### Example 11: Built-in Log Endpoint
 
 ```cpp
 CachingPrinter logger(4096);  // 4KB log buffer
@@ -694,7 +852,7 @@ void setup() {
 }
 ```
 
-### Example 10: Redirect Responses
+### Example 12: Redirect Responses
 
 ```cpp
 server.on("/old-path", [](HttpRequest &req) {
@@ -709,6 +867,100 @@ server.on("/temp-redirect", [](HttpRequest &req) {
 ---
 
 ## Advanced Features
+
+### Structured Configuration
+
+Use `HttpServerConfig` for cleaner, more organized server setup:
+
+```cpp
+void setup() {
+    HttpServer::HttpServerConfig config;
+    
+    // Network settings
+    config.port = 8080;
+    
+    // Resource limits
+    config.maxRequestSize = 4096;        // 4KB max
+    config.maxConnections = 8;            // 8 concurrent connections
+    
+    // Timeouts
+    config.clientTimeout = 3000;          // 3 second client timeout
+    config.connectionInactivityTimeout = 60000;  // 1 minute inactivity
+    
+    // Connection behavior
+    config.keepAlive = true;              // Enable persistent connections
+    
+    // Debugging
+    config.debug = true;                  // Enable debug logging
+    
+    server.begin(config);
+}
+```
+
+### Connection Management
+
+The server provides fine-grained control over connections:
+
+```cpp
+// Set maximum concurrent connections
+server.setMaxConnections(8);
+
+// Enable keep-alive for persistent connections
+server.setKeepAlive(true);
+
+// Set inactivity timeout (connections idle longer than this are closed)
+server.setConnectionInactivityTimeout(60000);  // 1 minute
+
+// Get current settings
+Serial.print("Max connections: ");
+Serial.println(server.getMaxConnections());
+Serial.print("Keep-alive: ");
+Serial.println(server.getKeepAlive() ? "enabled" : "disabled");
+```
+
+### Default Headers
+
+Add headers that will be automatically included in all responses:
+
+```cpp
+void setup() {
+    // Add default headers
+    server.addDefaultHeader("X-Powered-By", "ESP32");
+    server.addDefaultHeader("X-API-Version", "1.0");
+    server.addDefaultHeader("Cache-Control", "no-cache");
+    
+    // These headers will be in every response unless overridden
+    server.begin();
+}
+
+// Remove a default header
+server.removeDefaultHeader("X-Powered-By");
+
+// Clear all default headers
+server.clearDefaultHeaders();
+```
+
+### Before-Send Hook
+
+Execute custom logic just before sending any response:
+
+```cpp
+void setup() {
+    // Add response timing
+    server.onBeforeSend([](HttpRequest &req, HttpResponse &response) {
+        // Add timestamp
+        response.setHeader("X-Response-Time", String(millis()));
+        
+        // Log response
+        Serial.print("Sending ");
+        Serial.print(response.status);
+        Serial.print(" for ");
+        Serial.println(req.path);
+    });
+    
+    server.begin();
+}
+```
 
 ### Memory Management
 
@@ -744,11 +996,52 @@ server.setMaxRequestSize(2048);  // 2KB
 ### Connection Timeouts
 
 ```cpp
-// Shorten timeout for faster rejection of slow clients
+// Client timeout (read/write operations)
 server.setClientTimeout(2000);  // 2 seconds
 
 // Longer timeout for slow networks
 server.setClientTimeout(10000);  // 10 seconds
+
+// Inactivity timeout (idle connections)
+server.setConnectionInactivityTimeout(120000);  // 2 minutes
+```
+
+### Built-in Endpoints
+
+The server provides useful built-in endpoints that can be overridden:
+
+#### Root Endpoint (`/`)
+
+By default, returns a simple HTML welcome page showing the server name and version:
+
+```cpp
+// Override the default root handler
+server.on("/", [](HttpRequest &req) {
+    return HttpResponse().html("<h1>My Custom Home Page</h1>");
+});
+```
+
+#### Log Endpoint (`/log`)
+
+Automatically available when a logger is configured. Returns recent log entries as plain text:
+
+```cpp
+// Configure logger
+CachingPrinter logger(4096);
+server.setLogger(logger);
+
+// Log endpoint is now available at: http://your-ip/log
+// Query parameters:
+// - ?lines=N - Number of lines to return (default: 20)
+
+// Examples:
+// http://your-ip/log           -> Last 20 lines
+// http://your-ip/log?lines=50  -> Last 50 lines
+
+// Override if you want custom log behavior
+server.on("/log", [](HttpRequest &req) {
+    // Custom log implementation
+});
 ```
 
 ### Debug Logging
@@ -827,20 +1120,47 @@ response.html("<html>");  // Sets text/html; charset=utf-8
 response.text("Hello");   // Sets text/plain; charset=utf-8
 ```
 
-### 5. Handle Methods Appropriately
+### 5. Use Method-Specific Routes
 
-Check HTTP methods when necessary.
+Prefer method-specific route registration for cleaner, more RESTful APIs:
 
 ```cpp
-server.on("/api/update", [](HttpRequest &req) {
-    if (req.method != "POST" && req.method != "PUT") {
-        return HttpResponse::error(405, "Method Not Allowed");
-    }
-    // Process update...
+// ✅ GOOD - Clear, specific
+server.on("GET", "/api/user/:id", getUser);
+server.on("PUT", "/api/user/:id", updateUser);
+server.on("DELETE", "/api/user/:id", deleteUser);
+
+// ❌ OKAY but less clear
+server.on("/api/user", [](HttpRequest &req) {
+    if (req.method == "GET") return getUser(req);
+    if (req.method == "POST") return createUser(req);
+    return HttpResponse::error(405, "Method Not Allowed");
 });
 ```
 
-### 6. Use CORS for Web Access
+### 6. Validate Path Parameters
+
+Always validate path parameters before using them:
+
+```cpp
+server.on("GET", "/api/user/:id", [](HttpRequest &req) {
+    String userId = req.params["id"];
+    
+    // Validate
+    if (userId.isEmpty()) {
+        return HttpResponse::error(400, "Missing user ID");
+    }
+    
+    int id = userId.toInt();
+    if (id <= 0) {
+        return HttpResponse::error(400, "Invalid user ID");
+    }
+    
+    // Process valid ID...
+});
+```
+
+### 7. Use CORS for Web Access
 
 Enable CORS if accessing from web browsers.
 
@@ -848,7 +1168,7 @@ Enable CORS if accessing from web browsers.
 server.enableCORS();  // Allow all origins
 ```
 
-### 7. Configure Before begin()
+### 8. Configure Before begin()
 
 Set all configuration before starting the server.
 
@@ -860,7 +1180,30 @@ server.setDebug(true);
 server.begin();  // Start last
 ```
 
-### 8. Monitor Memory
+### 9. Use Short-Circuit Middleware for Guards
+
+Use boolean-returning middleware for authentication, rate limiting, and other guard logic:
+
+```cpp
+// ✅ GOOD - Short-circuit on auth failure
+server.use([](HttpRequest &req, HttpResponse &response) -> bool {
+    if (needsAuth(req) && !isAuthenticated(req)) {
+        response.setStatus(401).text("Unauthorized");
+        return false;  // Stop processing
+    }
+    return true;
+});
+
+// ❌ BAD - Can't stop processing, handler still runs
+server.use([](HttpRequest &req, HttpResponse &response) {
+    if (needsAuth(req) && !isAuthenticated(req)) {
+        response.setStatus(401).text("Unauthorized");
+        // Handler still executes!
+    }
+});
+```
+
+### 10. Monitor Memory
 
 On ESP32, monitor free heap to prevent crashes.
 

@@ -54,6 +54,8 @@ void setup() {
     Serial.println(WiFi.localIP());
     
     // Define routes
+    // Note: Root endpoint "/" has a built-in default handler
+    // Override it if you want custom behavior:
     server.on("/", [](HttpRequest &req) {
         HttpResponse response;
         response.html("<html><body><h1>Hello from ESP32!</h1></body></html>");
@@ -101,6 +103,13 @@ server.on("/api/status", [](HttpRequest &req) {
     return HttpResponse().text("Online");
 });
 
+// Method-specific routes with path parameters
+server.on("GET", "/api/user/:id", [](HttpRequest &req) {
+    String userId = req.params["id"];
+    return HttpResponse().json("{\"id\":\"" + userId + "\",\"name\":\"User\"}");
+});
+// Visit: http://YOUR_IP/api/user/123
+
 // Handle query parameters
 server.on("/api/echo", [](HttpRequest &req) {
     String message = req.getQueryParam("message", "Hello");
@@ -139,7 +148,8 @@ void setup() {
     server.begin();
 }
 
-// Access logs at: http://YOUR_IP/log
+// Built-in log endpoint: http://YOUR_IP/log
+// With custom line count: http://YOUR_IP/log?lines=50
 ```
 
 ### Handle POST Requests
@@ -180,6 +190,24 @@ void setup() {
 ```
 
 ## Common Patterns
+
+### Advanced Configuration
+
+```cpp
+void setup() {
+    // Configure using struct for cleaner setup
+    HttpServer::HttpServerConfig config;
+    config.port = 8080;
+    config.maxRequestSize = 4096;  // 4KB
+    config.clientTimeout = 3000;   // 3 seconds
+    config.connectionInactivityTimeout = 60000;  // 1 minute
+    config.maxConnections = 8;
+    config.keepAlive = true;
+    config.debug = true;
+    
+    server.begin(config);
+}
+```
 
 ### JSON API
 

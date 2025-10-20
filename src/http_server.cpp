@@ -4,13 +4,19 @@
 #include "picohttpparser/picohttpparser.h"
 
 // ============================================================================
+// Client Connection Constants
+// ============================================================================
+const size_t CLIENT_INACTIVITY_TIMEOUT_MS = 300000; // 5 mins
+
+
+// ============================================================================
 // HttpServer Implementation
 // ============================================================================
 
 HttpServer::HttpServer() : server(80) {
     // Initialize with nullptr handlers
-    notFoundHandler = nullptr;
-    errorHandler = nullptr;
+        notFoundHandler = nullptr;
+        errorHandler = nullptr;
 }
 
 void HttpServer::begin() {
@@ -20,10 +26,38 @@ void HttpServer::begin() {
         }
         return;
     }
-    
+
+    HttpServerConfig cfg; // defaults
+    cfg.port = port; // preserve any previously set port
+    cfg.maxRequestSize = maxRequestSize;
+    cfg.clientTimeout = clientTimeout;
+    cfg.connectionInactivityTimeout = connectionInactivityTimeout;
+    cfg.maxConnections = maxConnections;
+    cfg.keepAlive = keepAlive;
+    cfg.debug = debug;
+    begin(cfg);
+}
+
+void HttpServer::begin(const HttpServerConfig &config) {
+    if (running) {
+        if (logger) {
+            logger->println("[HTTP] Server already running");
+        }
+        return;
+    }
+
+    port = config.port;
+    maxRequestSize = config.maxRequestSize;
+    clientTimeout = config.clientTimeout;
+    connectionInactivityTimeout = config.connectionInactivityTimeout;
+    maxConnections = config.maxConnections;
+    keepAlive = config.keepAlive;
+    debug = config.debug;
+
+    server = WiFiServer(port);
     server.begin();
     running = true;
-    
+
     if (debug && logger) {
         logger->print("[HTTP] Server started on port ");
         logger->println(String(port));
@@ -52,11 +86,53 @@ void HttpServer::on(const String& path, RouteHandler handler) {
     }
 }
 
-void HttpServer::use(MiddlewareHandler middleware) {
-    middlewares.push_back(middleware);
-    
+void HttpServer::on(const String &method, const String &path, RouteHandler handler) {
+    // Build pattern handler
+    RoutePattern rp;
+    rp.method = method;
+    rp.pattern = path;
+    rp.handler = handler;
+    // Split pattern
+    rp.segments.clear();
+    String tmp = path;
+    if (tmp.length() > 1 && tmp.endsWith("/")) tmp.remove(tmp.length()-1);
+    int start = 0;
+    while (start < tmp.length()) {
+        int idx = tmp.indexOf('/', start);
+        if (idx == -1) idx = tmp.length();
+        String seg = tmp.substring(start, idx);
+        if (seg.length() > 0) {
+            rp.segments.push_back(seg);
+            if (seg.startsWith(":")) rp.hasParams = true;
+        }
+        start = idx + 1;
+    }
+    patternHandlers.push_back(rp);
     if (debug && logger) {
-        logger->println("[HTTP] Registered middleware");
+        logger->print("[HTTP] Registered route: ");
+        logger->print(method);
+        logger->print(" ");
+        logger->println(path);
+    }
+}
+
+void HttpServer::use(MiddlewareHandler middleware) {
+    // Wrap the legacy middleware to return true always
+    MiddlewareHandlerBool wrapped = [middleware](HttpRequest &req, HttpResponse &res) {
+        middleware(req, res);
+        return true; // always continue
+    };
+    middlewares.push_back(wrapped);
+
+    if (debug && logger) {
+        logger->println("[HTTP] Registered legacy middleware (consider upgrading to short-circuit capable middleware in the future)");
+    }
+}
+
+void HttpServer::use(MiddlewareHandlerBool middleware) {
+    middlewares.push_back(middleware);
+    if (debug && logger) {
+        logger->println("[HTTP] Registered short-circuit capable middleware");
     }
 }
 
@@ -129,6 +205,34 @@ void HttpServer::setClientTimeout(uint16_t timeoutMs) {
     clientTimeout = timeoutMs;
 }
 
+void HttpServer::setConnectionInactivityTimeout(uint32_t timeoutMs) {
+    connectionInactivityTimeout = timeoutMs;
+}
+
+void HttpServer::setMaxConnections(size_t maxConn) {
+    maxConnections = maxConn == 0 ? 1 : maxConn;
+}
+
+void HttpServer::setKeepAlive(bool enabled) {
+    keepAlive = enabled;
+}
+
+void HttpServer::addDefaultHeader(const String &name, const String &value) {
+    defaultHeaders[name] = value;
+}
+
+void HttpServer::removeDefaultHeader(const String &name) {
+    defaultHeaders.erase(name);
+}
+
+void HttpServer::clearDefaultHeaders() {
+    defaultHeaders.clear();
+}
+
+void HttpServer::onBeforeSend(std::function<void(HttpRequest &, HttpResponse &)> finalizer) {
+    beforeSendHook = finalizer;
+}
+
 void HttpServer::tick() {
     if (!running) {
         return;
@@ -136,7 +240,42 @@ void HttpServer::tick() {
 
     WiFiClient newClient = server.accept();
     if (newClient) {
-        handleClient(newClient);
+        if (debug && logger) {
+            logger->println("[HTTP] New client connected");
+        }
+        connections.push_back(std::unique_ptr<HttpClientConnection>(new HttpClientConnection(std::move(newClient))));
+    }
+
+    u64_t now = millis();
+    for (size_t i = 0; i < connections.size(); ) {
+        HttpClientConnection* conn = connections[i].get();
+        if (conn->connected()) {
+            if (!conn->isActive()) {
+                if (debug && logger) {
+                    logger->println("[HTTP] Closing inactive client connection");
+                }
+                connections.erase(connections.begin() + i);
+                continue;
+            }
+            
+            if (!handleConnection(conn)) {
+                if (debug && logger) {
+                    logger->println("[HTTP] Closing client connection after handling");
+                }
+                connections.erase(connections.begin() + i);
+            } else {
+                i++;
+            }
+        } else {
+            if (debug && logger) {
+                logger->println("[HTTP] Client disconnected");
+            }
+            connections.erase(connections.begin() + i);
+        }
+
+        if (millis() - now > 64) {
+            break;  // Avoid blocking too long (we'll check remaining clients next tick)
+        }
     }
 }
 
@@ -163,7 +302,17 @@ void HttpServer::applyCORS(HttpResponse &response) {
 
 void HttpServer::applyMiddlewares(HttpRequest &req, HttpResponse &response) {
     for (size_t i = 0; i < middlewares.size(); i++) {
-        middlewares[i](req, response);
+        if (!middlewares[i](req, response)) {
+            break; // short-circuit
+        }
+    }
+}
+
+void HttpServer::applyDefaultHeaders(HttpResponse &response) {
+    for (std::map<String,String>::const_iterator it = defaultHeaders.begin(); it != defaultHeaders.end(); ++it) {
+        if (!response.headers.count(it->first)) {
+            response.setHeader(it->first, it->second);
+        }
     }
 }
 
@@ -253,35 +402,27 @@ void HttpServer::logResponse(const HttpResponse &response) {
 }
 
 
-void HttpServer::handleClient(WiFiClient client) {
+bool HttpServer::handleConnection(HttpClientConnection* connection) {
     // Memory check
     if (!hasEnoughMemory()) {
         if (logger) {
             logger->println("[HTTP] Insufficient memory for new client");
         }
         HttpResponse response = generateErrorResponse(503, "Service Unavailable");
-        respondToClient(client, response);
-        client.stop();
-        return;
+        respondToClient(connection->getClient(), response);
+        return false;   // Done with this client connection - it can be closed
     }
 
-    // Set timeout for client connection
-    unsigned long startTime = millis();
-    if (debug && logger) {
-        logger->println("[HTTP] New client connected");
-    }
-    
-    // Wait for data with timeout
-    while (!client.available() && (millis() - startTime) < clientTimeout) {
+    WiFiClient &client = connection->getClient();
+
+    // Wait for client to be ready for upto 4ms - then give up and try later
+    u64_t startWait = millis();
+    while (millis() - startWait < 4 && !client.available()) {
         delay(1);
     }
-    
+
     if (!client.available()) {
-        if (debug && logger) {
-            logger->println("[HTTP] Client timeout - no data received");
-        }
-        client.stop();
-        return;
+        return true;
     }
 
     if (client.available() > 0) {
@@ -301,8 +442,7 @@ void HttpServer::handleClient(WiFiClient client) {
                 }
                 HttpResponse response = generateErrorResponse(413, "Payload Too Large");
                 respondToClient(client, response);
-                client.stop();
-                return;
+                return false;
             }
             
             byte tmpBuf[DEFAULT_BUFFER_SIZE];
@@ -312,10 +452,9 @@ void HttpServer::handleClient(WiFiClient client) {
                 if (logger) {
                     logger->println("[HTTP] Read error");
                 }
-                client.stop();
-                return;
+                return false;
             } else if (read_result == 0) {
-                return;
+                return false;
             }
 
             buflen = read_result;
@@ -327,8 +466,7 @@ void HttpServer::handleClient(WiFiClient client) {
                 }
                 HttpResponse response = generateErrorResponse(413, "Payload Too Large");
                 respondToClient(client, response);
-                client.stop();
-                return;
+                return false;
             }
             
             // Extend buffer if needed
@@ -357,8 +495,7 @@ void HttpServer::handleClient(WiFiClient client) {
                 }
                 HttpResponse response = generateErrorResponse(400, "Bad Request");
                 respondToClient(client, response);
-                client.stop();
-                return;
+                return false;
             } else if (parse_result == -2) {
                 // Incomplete request, continue reading
                 prevbuflen = buflen;
@@ -369,7 +506,7 @@ void HttpServer::handleClient(WiFiClient client) {
         }
 
         if (parse_result <= 0) {
-            return;
+            return false;
         }
 
         // Extract request body
@@ -418,6 +555,8 @@ void HttpServer::handleClient(WiFiClient client) {
             String headerName = String(headers[h].name, headers[h].name_len);
             String headerValue = String(headers[h].value, headers[h].value_len);
             req.headers[headerName] = headerValue;
+            String lower = headerName; lower.toLowerCase();
+            req.headersLower[lower] = headerValue;
         }
 
         logRequest(req);
@@ -430,30 +569,45 @@ void HttpServer::handleClient(WiFiClient client) {
             response.setStatus(204);
             applyCORS(response);
             respondToClient(client, response);
-            client.stop();
-            return;
+            return true;
         }
         
         // Apply middlewares
         applyMiddlewares(req, response);
         
-        // Route the request
-        if (httpHandlers.find(req.path) != httpHandlers.end()) {
+        // Attempt param/method route matching first
+        bool routed = false;
+        for (size_t r = 0; r < patternHandlers.size(); r++) {
+            if (matchPattern(patternHandlers[r], req.method, req.path, req)) {
+                try {
+                    response = patternHandlers[r].handler(req);
+                } catch (...) {
+                    if (logger) logger->println("[HTTP] Handler threw exception");
+                    response = generateErrorResponse(500, "Internal Server Error");
+                }
+                routed = true;
+                break;
+            }
+        }
+
+        if (!routed && httpHandlers.find(req.path) != httpHandlers.end()) {
             try {
                 response = httpHandlers[req.path](req);
             } catch (...) {
-                if (logger) {
-                    logger->println("[HTTP] Handler threw exception");
-                }
+                if (logger) logger->println("[HTTP] Handler threw exception");
                 response = generateErrorResponse(500, "Internal Server Error");
             }
-        } else if (req.path == "/") {
+            routed = true;
+        }
+
+        if (!routed && req.path == "/") {
             // Default root handler
             String html = "<html><head><title>" + serverName + "</title></head>";
             html += "<body><h1>Hello!</h1><h3>You're connected to " + serverName + "!</h3>";
             html += "<p>Version: " + serverVersion + "</p></body></html>";
             response.html(html);
-        } else if (req.path == "/log") {
+            routed = true;
+        } else if (!routed && req.path == "/log") {
             // Built-in log endpoint
             if (logger == nullptr) {
                 response = generateErrorResponse(404, "Logging not enabled");
@@ -466,7 +620,10 @@ void HttpServer::handleClient(WiFiClient client) {
                 String log_tail = logger->tail(num_lines).c_str();
                 response.text(log_tail);
             }
-        } else {
+            routed = true;
+        }
+
+        if (!routed) {
             // Not found
             if (notFoundHandler) {
                 response = notFoundHandler(req);
@@ -484,14 +641,27 @@ void HttpServer::handleClient(WiFiClient client) {
         if (!response.headers.count("Server")) {
             response.setHeader("Server", serverName + "/" + serverVersion);
         }
+        // Apply default headers
+        applyDefaultHeaders(response);
+        // Keep-Alive / Connection header
+        if (keepAlive) {
+            response.setHeader("Connection", "keep-alive");
+        } else {
+            response.setHeader("Connection", "close");
+        }
+        // Final hook
+        if (beforeSendHook) {
+            beforeSendHook(req, response);
+        }
         
         // Send response
         logResponse(response);
         respondToClient(client, response);
         
-        // Close connection
-        client.stop();
+        connection->updateActivity();
     }
+
+    return true;
 }
 
 bool HttpServer::respondToClient(WiFiClient& client, HttpResponse& response) {
@@ -589,18 +759,9 @@ bool HttpRequest::jsonRequested() const {
 }
 
 String HttpRequest::getHeader(const String &name, const String &defaultValue) const {
-    // Case-insensitive header lookup
-    String lowerName = name;
-    lowerName.toLowerCase();
-    
-    for (std::map<String, String>::const_iterator it = headers.begin(); it != headers.end(); ++it) {
-        String headerName = it->first;
-        headerName.toLowerCase();
-        if (headerName == lowerName) {
-            return it->second;
-        }
-    }
-    
+    String lowerName = name; lowerName.toLowerCase();
+    std::map<String,String>::const_iterator it = headersLower.find(lowerName);
+    if (it != headersLower.end()) return it->second;
     return defaultValue;
 }
 
@@ -613,7 +774,36 @@ String HttpRequest::getQueryParam(const String &name, const String &defaultValue
 }
 
 bool HttpRequest::hasHeader(const String &name) const {
-    return getHeader(name, "").length() > 0;
+    String lowerName = name; lowerName.toLowerCase();
+    return headersLower.find(lowerName) != headersLower.end();
+}
+
+bool HttpServer::matchPattern(const RoutePattern &rp, const String &method, const String &path, HttpRequest &req) {
+    if (!rp.method.equalsIgnoreCase(method)) return false;
+    String normPath = path;
+    if (normPath.length() > 1 && normPath.endsWith("/")) normPath.remove(normPath.length()-1);
+    // Split incoming path
+    std::vector<String> pathSegs;
+    int start = 0;
+    while (start < normPath.length()) {
+        int idx = normPath.indexOf('/', start);
+        if (idx == -1) idx = normPath.length();
+        String seg = normPath.substring(start, idx);
+        if (seg.length() > 0) pathSegs.push_back(seg);
+        start = idx + 1;
+    }
+    if (pathSegs.size() != rp.segments.size()) return false;
+    for (size_t i = 0; i < rp.segments.size(); i++) {
+        const String &patSeg = rp.segments[i];
+        const String &actSeg = pathSegs[i];
+        if (patSeg.startsWith(":")) {
+            String key = patSeg.substring(1);
+            req.params[key] = actSeg;
+        } else if (patSeg != actSeg) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool HttpRequest::hasQueryParam(const String &name) const {
@@ -694,6 +884,36 @@ HttpResponse HttpResponse::error(int statusCode, const String &message) {
     response.text(message);
     return response;
 }
+
+
+
+HttpClientConnection::HttpClientConnection(WiFiClient client) : client(client) {
+    lastActivityMillis = millis();
+}
+
+HttpClientConnection::~HttpClientConnection() {
+    if (client) {
+        client.stop();
+    }
+}
+
+void HttpClientConnection::updateActivity() {
+    lastActivityMillis = millis();
+}
+
+bool HttpClientConnection::isActive() const {
+    return (millis() - lastActivityMillis) < CLIENT_INACTIVITY_TIMEOUT_MS;
+}
+
+bool HttpClientConnection::connected() {
+    return client.connected();
+}
+
+WiFiClient& HttpClientConnection::getClient() {
+    return client;
+}
+
+
 
 // ============================================================================
 // WiFi Utility Functions

@@ -3,7 +3,13 @@
 *.zip
 .local/
 arduino_secrets.h
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/settings.json
 
+## Ignore test project
+src/main.cpp
+boards/
 
 # Prerequisites
 *.d

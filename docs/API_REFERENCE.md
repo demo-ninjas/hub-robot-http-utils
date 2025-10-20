@@ -42,13 +42,13 @@ server.on("/hello", myHandler);
 
 ---
 
-### MiddlewareHandler
+### MiddlewareHandler (Legacy)
 
 ```cpp
 typedef std::function<void(HttpRequest &, HttpResponse &)> MiddlewareHandler;
 ```
 
-A function that processes all requests/responses (middleware).
+A legacy function that processes all requests/responses (middleware). Always continues to next middleware/handler.
 
 **Parameters:**
 - `HttpRequest &` - The incoming request
@@ -64,6 +64,35 @@ MiddlewareHandler logger = [](HttpRequest &req, HttpResponse &response) {
 };
 
 server.use(logger);
+```
+
+---
+
+### MiddlewareHandlerBool (Recommended)
+
+```cpp
+typedef std::function<bool(HttpRequest &, HttpResponse &)> MiddlewareHandlerBool;
+```
+
+A function that processes all requests/responses with short-circuit capability.
+
+**Parameters:**
+- `HttpRequest &` - The incoming request
+- `HttpResponse &` - The response (can be modified)
+
+**Returns:**
+- `bool` - `true` to continue processing, `false` to stop and send response immediately
+
+**Example:**
+```cpp
+// Authentication middleware that can reject requests
+server.use([](HttpRequest &req, HttpResponse &response) {
+    if (!req.hasHeader("Authorization")) {
+        response.setStatus(401).text("Unauthorized");
+        return false;  // Stop processing
+    }
+    return true;  // Continue to next middleware/handler
+});
 ```
 
 ---
@@ -116,13 +145,48 @@ HttpServer server;
 
 #### `void begin()`
 
-Start the HTTP server. Must be called after all configuration.
+Start the HTTP server with current configuration. Must be called after all configuration.
 
 **Example:**
 ```cpp
 server.setPort(8080);
 server.on("/hello", handler);
 server.begin();  // Start server
+```
+
+---
+
+#### `void begin(const HttpServerConfig &config)`
+
+Start the HTTP server with structured configuration.
+
+**Parameters:**
+- `config` - Configuration struct with all server settings
+
+**HttpServerConfig Structure:**
+```cpp
+struct HttpServerConfig {
+    uint16_t port = 80;
+    size_t maxRequestSize = 8192;
+    uint16_t clientTimeout = 5000;
+    uint32_t connectionInactivityTimeout = 300000;  // 5 min
+    size_t maxConnections = 4;
+    bool keepAlive = false;
+    bool debug = false;
+};
+```
+
+**Example:**
+```cpp
+HttpServer::HttpServerConfig config;
+config.port = 8080;
+config.maxRequestSize = 4096;
+config.clientTimeout = 3000;
+config.maxConnections = 8;
+config.keepAlive = true;
+config.debug = true;
+
+server.begin(config);
 ```
 
 ---
@@ -327,7 +391,7 @@ server.onError([](int code, const String &msg) {
 
 #### `void use(MiddlewareHandler middleware)`
 
-Register middleware that runs for all requests.
+Register legacy middleware that runs for all requests (always continues processing).
 
 **Parameters:**
 - `middleware` - Function to process requests/responses
@@ -347,7 +411,50 @@ server.use([](HttpRequest &req, HttpResponse &response) {
 });
 ```
 
-**Note:** Middlewares execute in registration order.
+**Note:** Middlewares execute in registration order. This version always continues to the next middleware/handler.
+
+---
+
+#### `void use(MiddlewareHandlerBool middleware)`
+
+Register short-circuit capable middleware that runs for all requests.
+
+**Parameters:**
+- `middleware` - Function to process requests/responses, returns bool
+
+**Return Value:**
+- `true` - Continue to next middleware/handler
+- `false` - Stop processing, send current response immediately
+
+**Example:**
+```cpp
+// Authentication middleware
+server.use([](HttpRequest &req, HttpResponse &response) {
+    // Skip auth for public endpoints
+    if (req.path.startsWith("/public/")) {
+        return true;  // Continue
+    }
+    
+    // Check authentication
+    if (!req.hasHeader("Authorization")) {
+        response.setStatus(401).text("Unauthorized");
+        return false;  // Short-circuit, send 401
+    }
+    
+    return true;  // Continue to handler
+});
+
+// Rate limiting middleware
+server.use([](HttpRequest &req, HttpResponse &response) {
+    if (isRateLimited(req)) {
+        response.setStatus(429).text("Too Many Requests");
+        return false;  // Stop processing
+    }
+    return true;  // Continue
+});
+```
+
+**Note:** Recommended over legacy `MiddlewareHandler` for better control flow.
 
 ---
 
@@ -424,6 +531,105 @@ Serial.println(server.getPort());
 
 ---
 
+#### `bool getKeepAlive() const`
+
+Get the current keep-alive setting.
+
+**Returns:**
+- `true` if keep-alive is enabled
+
+**Example:**
+```cpp
+if (server.getKeepAlive()) {
+    Serial.println("Keep-alive enabled");
+}
+```
+
+---
+
+#### `size_t getMaxConnections() const`
+
+Get the maximum number of concurrent connections.
+
+**Returns:**
+- Maximum connection count
+
+**Example:**
+```cpp
+Serial.print("Max connections: ");
+Serial.println(server.getMaxConnections());
+```
+
+---
+
+### Header Management
+
+#### `void addDefaultHeader(const String &name, const String &value)`
+
+Add a default header that will be included in all responses (unless overridden).
+
+**Parameters:**
+- `name` - Header name
+- `value` - Header value
+
+**Example:**
+```cpp
+server.addDefaultHeader("X-Powered-By", "ESP32");
+server.addDefaultHeader("X-API-Version", "1.0");
+```
+
+---
+
+#### `void removeDefaultHeader(const String &name)`
+
+Remove a default header.
+
+**Parameters:**
+- `name` - Header name to remove
+
+**Example:**
+```cpp
+server.removeDefaultHeader("X-Powered-By");
+```
+
+---
+
+#### `void clearDefaultHeaders()`
+
+Clear all default headers.
+
+**Example:**
+```cpp
+server.clearDefaultHeaders();
+```
+
+---
+
+### Response Finalization
+
+#### `void onBeforeSend(std::function<void(HttpRequest &, HttpResponse &)> finalizer)`
+
+Register a hook that runs just before sending any response. Useful for logging, adding dynamic headers, etc.
+
+**Parameters:**
+- `finalizer` - Function to execute before sending response
+
+**Example:**
+```cpp
+server.onBeforeSend([](HttpRequest &req, HttpResponse &response) {
+    // Add timestamp to all responses
+    response.setHeader("X-Response-Time", String(millis()));
+    
+    // Log response
+    Serial.print("Sending ");
+    Serial.print(response.status);
+    Serial.print(" for ");
+    Serial.println(req.path);
+});
+```
+
+---
+
 ## HttpRequest Class
 
 Represents an incoming HTTP request.
@@ -495,6 +701,24 @@ Query parameters (name -> value).
 // GET /api/data?limit=10&offset=0
 String limit = req.query["limit"];    // "10"
 String offset = req.query["offset"];  // "0"
+```
+
+---
+
+#### `std::map<String, String> params`
+
+Path parameters extracted from route patterns (name -> value).
+
+**Example:**
+```cpp
+// Route: GET /api/user/:id
+// Request: GET /api/user/123
+String userId = req.params["id"];  // "123"
+
+// Route: GET /api/post/:postId/comment/:commentId
+// Request: GET /api/post/456/comment/789
+String postId = req.params["postId"];        // "456"
+String commentId = req.params["commentId"];  // "789"
 ```
 
 ---
@@ -935,23 +1159,66 @@ Scanning Wifi Networks...3 Networks Found
 
 ---
 
+## Built-in Endpoints
+
+The server provides several built-in endpoints that can be overridden:
+
+### Root Endpoint: `/`
+
+**Default Behavior:** Returns a simple HTML welcome page with server name and version.
+
+**Override:**
+```cpp
+server.on("/", [](HttpRequest &req) {
+    return HttpResponse().html("<h1>Custom Home Page</h1>");
+});
+```
+
+---
+
+### Log Endpoint: `/log`
+
+**Requirements:** Must call `server.setLogger(logger)` first.
+
+**Default Behavior:** Returns the last N lines from the log buffer as plain text.
+
+**Query Parameters:**
+- `lines` - Number of lines to return (default: 20)
+
+**Examples:**
+- `http://your-ip/log` - Last 20 lines
+- `http://your-ip/log?lines=50` - Last 50 lines
+
+**Response Format:** Plain text, one log entry per line
+
+**Override:**
+```cpp
+server.on("/log", [](HttpRequest &req) {
+    // Custom log implementation
+});
+```
+
+---
+
 ## Constants
 
 ### Server Constants
 
 ```cpp
-static const size_t DEFAULT_BUFFER_SIZE = 2048;   // Default buffer size
-static const size_t MAX_BUFFER_SIZE = 8192;       // Maximum buffer size
-static const size_t MIN_FREE_RAM = 4096;          // Minimum free RAM required
-static const uint16_t CLIENT_TIMEOUT_MS = 5000;   // Client timeout (ms)
-static const uint16_t WRITE_TIMEOUT_MS = 1000;    // Write timeout (ms)
-static const size_t WRITE_CHUNK_SIZE = 512;       // Write chunk size
-static const size_t MAX_HEADERS = 16;             // Maximum headers to parse
+static const size_t DEFAULT_BUFFER_SIZE = 2048;           // Default buffer size
+static const size_t MAX_BUFFER_SIZE = 8192;               // Maximum buffer size
+static const size_t MIN_FREE_RAM = 4096;                  // Minimum free RAM required
+static const uint16_t CLIENT_TIMEOUT_MS = 5000;           // Client timeout (ms)
+static const uint16_t WRITE_TIMEOUT_MS = 1000;            // Write timeout (ms)
+static const size_t WRITE_CHUNK_SIZE = 512;               // Write chunk size
+static const size_t MAX_HEADERS = 16;                     // Maximum headers to parse
+static const size_t DEFAULT_MAX_CONNECTIONS = 4;          // Default max connections
 ```
 
 **Access:**
 ```cpp
 Serial.println(HttpServer::DEFAULT_BUFFER_SIZE);
+Serial.println(HttpServer::DEFAULT_MAX_CONNECTIONS);
 ```
 
 ---
@@ -1005,22 +1272,64 @@ void setup() {
         delay(500);
     }
     
-    // Server configuration
-    server.setPort(80);
+    // Server configuration using config struct
+    HttpServer::HttpServerConfig config;
+    config.port = 8080;
+    config.maxRequestSize = 4096;
+    config.clientTimeout = 3000;
+    config.maxConnections = 8;
+    config.keepAlive = true;
+    config.debug = true;
+    
     server.setServerName("MyDevice");
     server.setServerVersion("1.0.0");
     server.setLogger(logger);
-    server.setDebug(true);
     server.enableCORS();
     
-    // Middleware
+    // Default headers for all responses
+    server.addDefaultHeader("X-Powered-By", "ESP32");
+    server.addDefaultHeader("X-API-Version", "1.0");
+    
+    // Short-circuit middleware for auth
+    server.use([](HttpRequest &req, HttpResponse &response) -> bool {
+        // Skip auth for public endpoints
+        if (req.path.startsWith("/public")) {
+            return true;
+        }
+        
+        if (!req.hasHeader("Authorization")) {
+            response.setStatus(401).text("Unauthorized");
+            return false;  // Stop processing
+        }
+        return true;
+    });
+    
+    // Legacy middleware (always continues)
     server.use([](HttpRequest &req, HttpResponse &response) {
-        response.setHeader("X-Powered-By", "ESP32");
+        logger.print("Request: ");
+        logger.print(req.method);
+        logger.print(" ");
+        logger.println(req.path);
     });
     
     // Routes
     server.on("/", [](HttpRequest &req) {
         return HttpResponse().html("<h1>Hello!</h1>");
+    });
+    
+    // Method-specific route with path parameters
+    server.on("GET", "/api/user/:id", [](HttpRequest &req) {
+        String userId = req.params["id"];
+        String json = "{\"id\":\"" + userId + "\",\"name\":\"User\"}";
+        return HttpResponse().json(json);
+    });
+    
+    // Multiple parameters
+    server.on("GET", "/api/post/:postId/comment/:commentId", [](HttpRequest &req) {
+        String postId = req.params["postId"];
+        String commentId = req.params["commentId"];
+        String json = "{\"post\":\"" + postId + "\",\"comment\":\"" + commentId + "\"}";
+        return HttpResponse().json(json);
     });
     
     server.on("/api/status", [](HttpRequest &req) {
@@ -1033,9 +1342,14 @@ void setup() {
         return HttpResponse::error(404, "Not found: " + req.path);
     });
     
-    // Start server
-    server.begin();
-    Serial.println("Server started!");
+    // Before-send hook
+    server.onBeforeSend([](HttpRequest &req, HttpResponse &response) {
+        response.setHeader("X-Response-Time", String(millis()));
+    });
+    
+    // Start server with config
+    server.begin(config);
+    Serial.println("Server started on port " + String(config.port));
 }
 
 void loop() {

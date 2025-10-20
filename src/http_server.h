@@ -25,7 +25,8 @@ class HttpServer;
 
 // Type definitions for cleaner code
 typedef std::function<HttpResponse(HttpRequest &)> RouteHandler;
-typedef std::function<void(HttpRequest &, HttpResponse &)> MiddlewareHandler;
+typedef std::function<void(HttpRequest &, HttpResponse &)> MiddlewareHandler; // legacy (always continue)
+typedef std::function<bool(HttpRequest &, HttpResponse &)> MiddlewareHandlerBool; // return false to short-circuit
 typedef std::function<HttpResponse(int, const String &)> ErrorHandler;
 
 /**
@@ -38,6 +39,8 @@ public:
     String body;
     std::map<String, String> headers;
     std::map<String, String> query;
+    std::map<String, String> params; // path parameters
+    std::map<String, String> headersLower; // lowercase header lookup
     
     HttpRequest();
     
@@ -171,6 +174,29 @@ public:
     static HttpResponse error(int statusCode, const String &message);
 };
 
+class HttpClientConnection {
+public:
+    HttpClientConnection(WiFiClient client);
+    ~HttpClientConnection();
+
+    void updateActivity();
+    bool isActive() const;
+    bool connected();
+    WiFiClient& getClient();
+
+private:
+    WiFiClient client;
+    u32_t lastActivityMillis;
+};
+
+struct RoutePattern {
+    String method;
+    String pattern; // e.g. /api/item/:id
+    std::vector<String> segments;
+    RouteHandler handler;
+    bool hasParams = false;
+};
+
 /**
  * @brief Lightweight HTTP server for ESP32 microcontrollers
  * 
@@ -193,6 +219,17 @@ public:
     static const uint16_t WRITE_TIMEOUT_MS = 1000;
     static const size_t WRITE_CHUNK_SIZE = 512;
     static const size_t MAX_HEADERS = 16;
+    static const size_t DEFAULT_MAX_CONNECTIONS = 4;
+
+    struct HttpServerConfig {
+        uint16_t port = 80;
+        size_t maxRequestSize = MAX_BUFFER_SIZE;
+        uint16_t clientTimeout = CLIENT_TIMEOUT_MS;
+        uint32_t connectionInactivityTimeout = 300000; // 5 min
+        size_t maxConnections = DEFAULT_MAX_CONNECTIONS;
+        bool keepAlive = false;
+        bool debug = false;
+    };
     
     HttpServer();
     
@@ -200,6 +237,7 @@ public:
      * @brief Start the HTTP server
      */
     void begin();
+    void begin(const HttpServerConfig &config); // config-based begin
     
     /**
      * @brief Stop the HTTP server
@@ -217,12 +255,14 @@ public:
      * @param handler Function to handle requests to this path
      */
     void on(const String &path, RouteHandler handler);
+    void on(const String &method, const String &path, RouteHandler handler); // method-specific + params
     
     /**
      * @brief Register a middleware handler (executes for all requests)
      * @param middleware Function to process request/response
      */
     void use(MiddlewareHandler middleware);
+    void use(MiddlewareHandlerBool middleware); // short-circuit capable
     
     /**
      * @brief Set custom error handler
@@ -292,6 +332,9 @@ public:
      * @param timeoutMs Timeout in milliseconds (default: 5000)
      */
     void setClientTimeout(uint16_t timeoutMs);
+    void setConnectionInactivityTimeout(uint32_t timeoutMs);
+    void setMaxConnections(size_t maxConn);
+    void setKeepAlive(bool enabled);
     
     /**
      * @brief Get server running state
@@ -304,6 +347,13 @@ public:
      * @return Port number
      */
     uint16_t getPort() const { return port; }
+    bool getKeepAlive() const { return keepAlive; }
+    size_t getMaxConnections() const { return maxConnections; }
+
+    void addDefaultHeader(const String &name, const String &value);
+    void removeDefaultHeader(const String &name);
+    void clearDefaultHeaders();
+    void onBeforeSend(std::function<void(HttpRequest &, HttpResponse &)> finalizer);
 
 private:
     // Configuration
@@ -314,7 +364,10 @@ private:
     uint16_t port = 80;
     uint16_t clientTimeout = CLIENT_TIMEOUT_MS;
     size_t maxRequestSize = MAX_BUFFER_SIZE;
-    String serverName = "HubServer";
+    uint32_t connectionInactivityTimeout = 300000;
+    size_t maxConnections = DEFAULT_MAX_CONNECTIONS;
+    bool keepAlive = false;
+    String serverName = "Hub-Server";
     String serverVersion = "1.0";
     String corsOrigin = "*";
     String corsMethods = "GET, POST, PUT, DELETE, OPTIONS";
@@ -322,23 +375,29 @@ private:
     
     // Server components
     WiFiServer server;
-    std::map<String, RouteHandler> httpHandlers;
-    std::vector<MiddlewareHandler> middlewares;
+    std::map<String, RouteHandler> httpHandlers; // legacy any-method exact path
+    std::vector<RoutePattern> patternHandlers;
+    std::vector<MiddlewareHandlerBool> middlewares; // unified middleware list
     RouteHandler notFoundHandler;
     ErrorHandler errorHandler;
+    std::vector<std::unique_ptr<HttpClientConnection>> connections;
+    std::map<String, String> defaultHeaders;
+    std::function<void(HttpRequest &, HttpResponse &)> beforeSendHook;
     
     // Internal methods
-    void handleClient(WiFiClient client);
+    bool handleConnection(HttpClientConnection* connection);
     bool respondToClient(WiFiClient &client, HttpResponse &response);
     HttpResponse generateErrorResponse(int statusCode, const String &message);
     void applyCORS(HttpResponse &response);
     void applyMiddlewares(HttpRequest &req, HttpResponse &response);
+    void applyDefaultHeaders(HttpResponse &response);
     bool parseHeaders(HttpRequest &req, const String &method, const String &path);
     String getStatusText(int statusCode);
     void logRequest(const HttpRequest &req);
     void logResponse(const HttpResponse &response);
     String toLowerCase(const String &str) const;
     bool hasEnoughMemory() const;
+    bool matchPattern(const RoutePattern &rp, const String &method, const String &path, HttpRequest &req);
 };
 
 /**
