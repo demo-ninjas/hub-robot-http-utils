@@ -1,46 +1,80 @@
-# Hub Robot - HTTP Utils
 
-A basic set of tools to provide both HTTP serving and consuming capabilities to your robot.
+# Hub Robot HTTP Utils
 
-## Available Tools
+**Hub Robot HTTP Utils** provides a lightweight, robust HTTP server for ESP32-based robots and embedded projects. It enables your device to serve HTTP requests, define custom API endpoints, and interact with web clients or other devices over WiFi.
 
-* HTTP Server
-* *HTTP Client* (not implemented yet)
+## Features
 
-## Dependent Libraries
+- **Route-based request handling**: Easily define handlers for specific URL paths (e.g., `/api/status`).
+- **Middleware support**: Add custom logic (logging, authentication, etc.) that runs for every request.
+- **Built-in CORS support**: Enable cross-origin requests with a single call.
+- **Custom error handling**: Define your own error and 404 responses.
+- **Request/response utilities**: Access headers, query parameters, and content types with convenience methods.
+- **Configurable limits and timeouts**: Control buffer sizes, request body limits, and client timeouts for reliability.
+- **Memory-safe**: Designed for microcontrollers with careful bounds checking and low memory usage.
+- **Request logging**: Optional debug logging for development and troubleshooting.
+- **PicoHTTPParser integration**: Fast, minimal HTTP parsing using [PicoHTTPParser](https://github.com/h2o/picohttpparser).
 
-This library is dependent on the [Hub Robot Core](https://github.com/demo-ninjas/hub-robot-core) library - you *must* include that library in projects that use this library (this is automatically handled when using PlatformIO)
+> **Note:** HTTP client functionality is planned but not yet implemented.
 
-## PicoHTTPParser
+## Example Usage
 
-The HTTP Server code is using the PicoHTTPParser library to parse HTTP requests.
+See the [Quick Start Guide](docs/QUICKSTART.md) for a step-by-step example.
 
-A copy of a point in time of the parser is maintained in this repo - the source library is maintained here: https://github.com/h2o/picohttpparser
+```cpp
+#include <WiFi.h>
+#include <http_server.h>
 
+HttpServer server;
 
-## Dev Machine Setup
+void setup() {
+	// ... WiFi setup ...
+	server.on("/", [](HttpRequest &req) {
+		HttpResponse res;
+		res.html("<h1>Hello from ESP32!</h1>");
+		return res;
+	});
+	server.begin();
+}
 
-Make sure you have the following installed on your machine: 
+void loop() {
+	server.tick();
+}
+```
 
-* A C/C++ compiler + standard dev tools installed (gcc, git, cmake etc...)
-* PlatformIO Tools (https://platformio.org/)
-* VSCode (https://code.visualstudio.com/)
+## Documentation
 
-Install the following VSCode Extensions: 
+- [Quick Start Guide](docs/QUICKSTART.md): Get up and running in minutes.
+- [API Reference](docs/API_REFERENCE.md): Full class and method documentation.
+- [Usage Guide](docs/USAGE_GUIDE.md): Advanced usage, tips, and best practices.
 
-* C/C++ Extension pack (https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools-extension-pack) [This includes the C/C++ Extension]
-* CMake Tools (https://marketplace.visualstudio.com/items?itemName=ms-vscode.cmake-tools)
-* PlatformIO IDE (https://marketplace.visualstudio.com/items?itemName=platformio.platformio-ide)
+## Dependencies
 
-Install the `Arduino Espressif32` Framework in PlatformIO and make sure an ESP32 toolchain is installed (We typically use `ESP32S3`, eg. `toolchain-xtensa-esp32s3`).
+- [Hub Robot Core](https://github.com/demo-ninjas/hub-robot-core) (required, auto-included with PlatformIO)
+- [PicoHTTPParser](https://github.com/h2o/picohttpparser) (bundled snapshot)
 
-## Publish
+## Development Setup
 
-This library is intended to be used as a dependency for a Platform.io app.
+1. Install PlatformIO and VSCode.
+2. Install the following VSCode extensions:
+   - [C/C++ Extension Pack](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools-extension-pack)
+   - [CMake Tools](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cmake-tools)
+   - [PlatformIO IDE](https://marketplace.visualstudio.com/items?itemName=platformio.platformio-ide)
+3. Install the `Arduino Espressif32` framework and ESP32 toolchain (e.g., `ESP32S3`).
 
-The `library.json` describes the library and dependencies to Platform.io.
+## PlatformIO Integration
 
-increment the version number when making changes you want to be used by dependent libraries.
+Add this library to your `platformio.ini`:
 
-Currently, not published to PlatformIO, load the library dependency directly via the GitHub URL.
+```ini
+lib_deps = \
+	https://github.com/demo-ninjas/hub-robot-http-utils.git \
+	https://github.com/demo-ninjas/hub-robot-core.git
+```
+
+> **Note:** This library is not yet published to the PlatformIO registry. Use the GitHub URL for now.
+
+## License
+
+See [LICENSE](LICENSE).
 

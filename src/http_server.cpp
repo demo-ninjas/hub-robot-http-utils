@@ -3,16 +3,69 @@
 #include <string_utils.hpp>
 #include "picohttpparser/picohttpparser.h"
 
+// ============================================================================
+// HttpServer Implementation
+// ============================================================================
+
+HttpServer::HttpServer() : server(80) {
+    // Initialize with nullptr handlers
+    notFoundHandler = nullptr;
+    errorHandler = nullptr;
+}
+
 void HttpServer::begin() {
+    if (running) {
+        if (logger) {
+            logger->println("[HTTP] Server already running");
+        }
+        return;
+    }
+    
     server.begin();
-    this->running = true;
-    if (this->debug && this->logger) {
-        this->logger->println("HTTP Server started on port " + String(this->port));
+    running = true;
+    
+    if (debug && logger) {
+        logger->print("[HTTP] Server started on port ");
+        logger->println(String(port));
     }
 }
 
-void HttpServer::on(const String& path, std::function<HttpResponse(WiFiClient*, HttpRequest&)> handler) {
-    this->httpHandlers[path] = handler;
+void HttpServer::stop() {
+    if (!running) {
+        return;
+    }
+    
+    server.stop();
+    running = false;
+    
+    if (debug && logger) {
+        logger->println("[HTTP] Server stopped");
+    }
+}
+
+void HttpServer::on(const String& path, RouteHandler handler) {
+    httpHandlers[path] = handler;
+    
+    if (debug && logger) {
+        logger->print("[HTTP] Registered route: ");
+        logger->println(path);
+    }
+}
+
+void HttpServer::use(MiddlewareHandler middleware) {
+    middlewares.push_back(middleware);
+    
+    if (debug && logger) {
+        logger->println("[HTTP] Registered middleware");
+    }
+}
+
+void HttpServer::onError(ErrorHandler handler) {
+    errorHandler = handler;
+}
+
+void HttpServer::onNotFound(RouteHandler handler) {
+    notFoundHandler = handler;
 }
 
 void HttpServer::setDebug(bool debug) {
@@ -24,15 +77,15 @@ void HttpServer::setLogger(CachingPrinter& logger) {
 }
 
 void HttpServer::setPort(uint16_t port) {
-    if (this->running) {
-        if (this->logger) {
-            this->logger->println("Cannot change port while server is running");
+    if (running) {
+        if (logger) {
+            logger->println("[HTTP] Cannot change port while server is running");
         }
         return;
     }
     
     this->port = port;
-    this->server = WiFiServer(port);
+    server = WiFiServer(port);
 }
 
 void HttpServer::setServerName(const String& serverName) {
@@ -43,82 +96,271 @@ void HttpServer::setServerVersion(const String& serverVersion) {
     this->serverVersion = serverVersion;
 }
 
-HttpServer::HttpServer() : server(80) {}
+void HttpServer::enableCORS(const String &origin, const String &methods, const String &headers) {
+    corsEnabled = true;
+    corsOrigin = origin;
+    corsMethods = methods;
+    corsHeaders = headers;
+    
+    if (debug && logger) {
+        logger->println("[HTTP] CORS enabled");
+    }
+}
+
+void HttpServer::disableCORS() {
+    corsEnabled = false;
+    
+    if (debug && logger) {
+        logger->println("[HTTP] CORS disabled");
+    }
+}
+
+void HttpServer::setMaxRequestSize(size_t maxSize) {
+    if (maxSize > MAX_BUFFER_SIZE) {
+        maxRequestSize = MAX_BUFFER_SIZE;
+    } else if (maxSize < DEFAULT_BUFFER_SIZE) {
+        maxRequestSize = DEFAULT_BUFFER_SIZE;
+    } else {
+        maxRequestSize = maxSize;
+    }
+}
+
+void HttpServer::setClientTimeout(uint16_t timeoutMs) {
+    clientTimeout = timeoutMs;
+}
 
 void HttpServer::tick() {
-    if (!this->running) {
+    if (!running) {
         return;
     }
 
     WiFiClient newClient = server.accept();
     if (newClient) {
-        this->handleClient(newClient);
+        handleClient(newClient);
     }
 }
 
+bool HttpServer::hasEnoughMemory() const {
+    return freeRam() >= MIN_FREE_RAM;
+}
 
-void HttpServer::handleClient(WiFiClient newClient) {
-    // Check if we have enough resources for the new client
-    if (freeRam() < 4096) { // Require at least 4KB of memory to handle the new client
-        newClient.println("HTTP/1.1 503 Server Out of Resources");
-        newClient.println("Connection: close");
-        newClient.println("Content-Length: 0");
-        newClient.println();
-        newClient.stop();
+String HttpServer::toLowerCase(const String &str) const {
+    String result = str;
+    result.toLowerCase();
+    return result;
+}
+
+void HttpServer::applyCORS(HttpResponse &response) {
+    if (!corsEnabled) {
+        return;
+    }
+    
+    response.setHeader("Access-Control-Allow-Origin", corsOrigin);
+    response.setHeader("Access-Control-Allow-Methods", corsMethods);
+    response.setHeader("Access-Control-Allow-Headers", corsHeaders);
+    response.setHeader("Access-Control-Max-Age", "86400");
+}
+
+void HttpServer::applyMiddlewares(HttpRequest &req, HttpResponse &response) {
+    for (size_t i = 0; i < middlewares.size(); i++) {
+        middlewares[i](req, response);
+    }
+}
+
+HttpResponse HttpServer::generateErrorResponse(int statusCode, const String &message) {
+    if (errorHandler) {
+        return errorHandler(statusCode, message);
+    }
+    
+    HttpResponse response(statusCode);
+    response.setHeader("Content-Type", "text/plain");
+    response.setBody(message);
+    return response;
+}
+
+String HttpServer::getStatusText(int statusCode) {
+    switch (statusCode) {
+        case 200: return "OK";
+        case 201: return "Created";
+        case 204: return "No Content";
+        case 301: return "Moved Permanently";
+        case 302: return "Found";
+        case 304: return "Not Modified";
+        case 400: return "Bad Request";
+        case 401: return "Unauthorized";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 413: return "Payload Too Large";
+        case 500: return "Internal Server Error";
+        case 501: return "Not Implemented";
+        case 503: return "Service Unavailable";
+        default: return "Unknown";
+    }
+}
+
+void HttpServer::logRequest(const HttpRequest &req) {
+    if (!debug || !logger) {
+        return;
+    }
+    
+    logger->println("[HTTP] Request:");
+    logger->print("  Method: ");
+    logger->println(req.method);
+    logger->print("  Path: ");
+    logger->println(req.path);
+    
+    if (req.query.size() > 0) {
+        logger->println("  Query:");
+        for (std::map<String, String>::const_iterator it = req.query.begin(); it != req.query.end(); ++it) {
+            logger->print("    ");
+            logger->print(it->first);
+            logger->print(": ");
+            logger->println(it->second);
+        }
+    }
+    
+    if (req.headers.size() > 0) {
+        logger->println("  Headers:");
+        for (std::map<String, String>::const_iterator it = req.headers.begin(); it != req.headers.end(); ++it) {
+            logger->print("    ");
+            logger->print(it->first);
+            logger->print(": ");
+            logger->println(it->second);
+        }
+    }
+    
+    if (req.body.length() > 0) {
+        logger->print("  Body: ");
+        if (req.body.length() > 100) {
+            logger->print(req.body.substring(0, 100));
+            logger->println("...");
+        } else {
+            logger->println(req.body);
+        }
+    }
+}
+
+void HttpServer::logResponse(const HttpResponse &response) {
+    if (!debug || !logger) {
+        return;
+    }
+    
+    logger->print("[HTTP] Response: ");
+    logger->print(String(response.status));
+    logger->print(" ");
+    logger->println(getStatusText(response.status));
+}
+
+
+void HttpServer::handleClient(WiFiClient client) {
+    // Memory check
+    if (!hasEnoughMemory()) {
+        if (logger) {
+            logger->println("[HTTP] Insufficient memory for new client");
+        }
+        HttpResponse response = generateErrorResponse(503, "Service Unavailable");
+        respondToClient(client, response);
+        client.stop();
         return;
     }
 
+    // Set timeout for client connection
+    unsigned long startTime = millis();
+    if (debug && logger) {
+        logger->println("[HTTP] New client connected");
+    }
+    
+    // Wait for data with timeout
+    while (!client.available() && (millis() - startTime) < clientTimeout) {
+        delay(1);
+    }
+    
+    if (!client.available()) {
+        if (debug && logger) {
+            logger->println("[HTTP] Client timeout - no data received");
+        }
+        client.stop();
+        return;
+    }
 
-    if (newClient.available() > 0) {
-        const char* method, * path;
-        std::vector<byte> buf(2048);
+    if (client.available() > 0) {
+        const char* method;
+        const char* path;
+        std::vector<byte> buf(DEFAULT_BUFFER_SIZE);
         size_t parse_result = 0;
         int minor_version;
-        struct phr_header headers[12];
+        struct phr_header headers[MAX_HEADERS];
         size_t buflen = 0, prevbuflen = 0, method_len, path_len, num_headers;
+        
         while (parse_result <= 0) {
-            byte tmpBuf[2048];
-            int read_result = newClient.read(tmpBuf, 2048);
-            if (read_result == -1) {
-                // IOError - so print to serial and stop the client
-                if (this->logger) {
-                    this->logger->println("Error reading from HTTP client - will stop client");
+            // Check if we've exceeded max request size
+            if (prevbuflen >= maxRequestSize) {
+                if (logger) {
+                    logger->println("[HTTP] Request too large");
                 }
-                newClient.stop();
+                HttpResponse response = generateErrorResponse(413, "Payload Too Large");
+                respondToClient(client, response);
+                client.stop();
+                return;
+            }
+            
+            byte tmpBuf[DEFAULT_BUFFER_SIZE];
+            int read_result = client.read(tmpBuf, DEFAULT_BUFFER_SIZE);
+            
+            if (read_result == -1) {
+                if (logger) {
+                    logger->println("[HTTP] Read error");
+                }
+                client.stop();
+                return;
             } else if (read_result == 0) {
                 return;
             }
 
             buflen = read_result;
-            // Check if we need to extend the buffer
-            if (buflen + prevbuflen > buf.size()) {
-                // Create a new buffer and copy the old buffer into it
-                buf.resize(prevbuflen + buflen);
-                memcpy(buf.data() + prevbuflen, tmpBuf, buflen);
-            } else {
-                // Append tmpBuf to buf
-                memcpy(buf.data() + prevbuflen, tmpBuf, buflen);
+            
+            // Bounds check before resizing
+            if (buflen + prevbuflen > maxRequestSize) {
+                if (logger) {
+                    logger->println("[HTTP] Request exceeds max size");
+                }
+                HttpResponse response = generateErrorResponse(413, "Payload Too Large");
+                respondToClient(client, response);
+                client.stop();
+                return;
             }
+            
+            // Extend buffer if needed
+            if (buflen + prevbuflen > buf.size()) {
+                size_t newSize = prevbuflen + buflen;
+                if (newSize > maxRequestSize) {
+                    newSize = maxRequestSize;
+                }
+                buf.resize(newSize);
+            }
+            
+            // Append to buffer
+            memcpy(buf.data() + prevbuflen, tmpBuf, buflen);
             buflen = buflen + prevbuflen;
 
-            /* parse the request */
-            num_headers = sizeof(headers) / sizeof(headers[0]);
+            // Parse the request
+            num_headers = MAX_HEADERS;
             const char* buf_char = reinterpret_cast<const char*>(buf.data());
-            parse_result = phr_parse_request(buf_char, buflen, &method, &method_len, &path, &path_len, &minor_version, headers, &num_headers, prevbuflen);
+            parse_result = phr_parse_request(buf_char, buflen, &method, &method_len, 
+                                            &path, &path_len, &minor_version, 
+                                            headers, &num_headers, prevbuflen);
+            
             if (parse_result == -1) {
-                // Failed to parse the request, respond with a 400 Bad Request
-                if (this->logger) {
-                    this->logger->println("Failed to parse the request from HTTP client - will respond with a 400 Bad Request");
+                if (logger) {
+                    logger->println("[HTTP] Parse error");
                 }
-                newClient.println("HTTP/1.1 400 Bad Request");
-                newClient.println("Content-Type: text/plain");
-                newClient.println("Connection: close");
-                newClient.println("Content-Length: 0");
-                newClient.println();
-                newClient.stop();
-                break;
+                HttpResponse response = generateErrorResponse(400, "Bad Request");
+                respondToClient(client, response);
+                client.stop();
+                return;
             } else if (parse_result == -2) {
-                // Request is incomplete, continue the loop
+                // Incomplete request, continue reading
                 prevbuflen = buflen;
                 continue;
             } else {
@@ -127,185 +369,335 @@ void HttpServer::handleClient(WiFiClient newClient) {
         }
 
         if (parse_result <= 0) {
-            // Failed to parse the request, so move onto the next client
             return;
         }
 
-        if (buflen == sizeof(buf)) {
-            // Request is too long, respond with a 413 Payload Too Large
-            if (this->logger) {
-                this->logger->println("Request from HTTP client is too large - will respond with a 413 Payload Too Large");
-            }
-            newClient.println("HTTP/1.1 413 Payload Too Large");
-            newClient.println("Content-Type: text/plain");
-            newClient.println("Connection: close");
-            newClient.println("Content-Length: 0");
-            newClient.println();
-            newClient.stop();
-            return;
-        }
-
-        // Grab the Request Details
+        // Extract request body
         String body = "";
-        // Set body to the remainder of the buffer after the headers
-        if (parse_result < buflen) {
-            body = String(reinterpret_cast<const char*>(buf.data()) + parse_result);
+        if (static_cast<size_t>(parse_result) < buflen) {
+            size_t bodyLen = buflen - parse_result;
+            if (bodyLen > 0) {
+                body = String(reinterpret_cast<const char*>(buf.data()) + parse_result);
+            }
         }
 
-        HttpRequest req = HttpRequest();
+        // Build HttpRequest object
+        HttpRequest req;
         req.method = String(method, method_len);
+        req.body = body;
+        
+        // Parse path and query string
         std::string full_path = std::string(path, path_len);
-        if (full_path.find('?') != std::string::npos) {
-            req.path = String(full_path.substr(0, full_path.find('?')).c_str());
-            if (req.path.endsWith("/")) {
-                req.path.remove(req.path.length() - 1);
-            }
-            std::string query_string = full_path.substr(full_path.find('?') + 1);
+        size_t queryPos = full_path.find('?');
+        
+        if (queryPos != std::string::npos) {
+            req.path = String(full_path.substr(0, queryPos).c_str());
+            
+            // Parse query parameters
+            std::string query_string = full_path.substr(queryPos + 1);
             std::vector<std::string> query_pairs = split(query_string, '&');
-            for (std::string pair : query_pairs) {
-                std::vector<std::string> key_value = split(pair, '=');
+            for (size_t i = 0; i < query_pairs.size(); i++) {
+                std::vector<std::string> key_value = split(query_pairs[i], '=');
                 if (key_value.size() == 2) {
                     req.query[String(key_value[0].c_str())] = String(key_value[1].c_str());
+                } else if (key_value.size() == 1) {
+                    req.query[String(key_value[0].c_str())] = "";
                 }
             }
         } else {
             req.path = String(path, path_len);
         }
-        req.body = body;
-        for (size_t h = 0; h != num_headers; ++h) {
-            req.headers[String(headers[h].name, headers[h].name_len)] = String(headers[h].value, (int)headers[h].value_len);
+        
+        // Remove trailing slash (except for root)
+        if (req.path.length() > 1 && req.path.endsWith("/")) {
+            req.path.remove(req.path.length() - 1);
+        }
+        
+        // Parse headers
+        for (size_t h = 0; h < num_headers; h++) {
+            String headerName = String(headers[h].name, headers[h].name_len);
+            String headerValue = String(headers[h].value, headers[h].value_len);
+            req.headers[headerName] = headerValue;
         }
 
+        logRequest(req);
 
-        // Write some debugging info to the serial port
-        if (this->debug && this->logger) {
-            this->logger->println("HTTP Request:");
-            this->logger->println("  Method: " + req.method);
-            this->logger->println("  Path: " + req.path);
-            this->logger->println("  Query Params: ");
-            for (std::map<String, String>::const_iterator it = req.query.begin(); it != req.query.end(); ++it) {
-                this->logger->println("    " + it->first + ": " + it->second);
-            }
-            this->logger->println("  Headers: ");
-            for (std::map<String, String>::const_iterator it = req.headers.begin(); it != req.headers.end(); ++it) {
-                this->logger->println("    " + it->first + ": " + it->second);
-            }
-            if (req.body.length() > 0)
-                this->logger->println("  Body: " + req.body);
-            this->logger->println("---");
+        // Create response
+        HttpResponse response;
+        
+        // Handle OPTIONS for CORS preflight
+        if (corsEnabled && req.method == "OPTIONS") {
+            response.setStatus(204);
+            applyCORS(response);
+            respondToClient(client, response);
+            client.stop();
+            return;
         }
-
-        // Look for a request handler for the path
-        if (this->httpHandlers.find(req.path) != this->httpHandlers.end()) {
-            // Pass the request to the handler
-            HttpResponse response = this->httpHandlers[req.path](&newClient, req);
-            respondToClient(newClient, response);
-        } else if (req.path.length() == 1 && req.path[0] == '/') {
-            // Respond with a default response
-            String response_text = "<html><head><title>Innovation Hub - HTTP Server</title></head><body><h1>Hello!</h1><h3>You're connected to " + this->serverName + "!</h3></body></html>";
-            newClient.println("HTTP/1.1 200 OK");
-            newClient.println("Content-Type: text/html");
-            newClient.println("Content-Length: " + String(utf8ByteLength(response_text)));
-            newClient.println();
-            newClient.print(response_text.c_str());  // send the response body
+        
+        // Apply middlewares
+        applyMiddlewares(req, response);
+        
+        // Route the request
+        if (httpHandlers.find(req.path) != httpHandlers.end()) {
+            try {
+                response = httpHandlers[req.path](req);
+            } catch (...) {
+                if (logger) {
+                    logger->println("[HTTP] Handler threw exception");
+                }
+                response = generateErrorResponse(500, "Internal Server Error");
+            }
+        } else if (req.path == "/") {
+            // Default root handler
+            String html = "<html><head><title>" + serverName + "</title></head>";
+            html += "<body><h1>Hello!</h1><h3>You're connected to " + serverName + "!</h3>";
+            html += "<p>Version: " + serverVersion + "</p></body></html>";
+            response.html(html);
         } else if (req.path == "/log") {
-            // Respond with the log buffer
-            if (this->logger == nullptr) {
-                // No logger set, so respond with a 404 - this method is not provided on this device
-                newClient.println("HTTP/1.1 404 Not Found");
-                newClient.println("Content-Type: text/plain");
-                newClient.println("Content-Length: 0");
-                newClient.println();
+            // Built-in log endpoint
+            if (logger == nullptr) {
+                response = generateErrorResponse(404, "Logging not enabled");
             } else {
                 size_t num_lines = 20;
-                if (req.query.find("lines") != req.query.end()) {
-                    num_lines = req.query["lines"].toInt();
+                if (req.hasQueryParam("lines")) {
+                    num_lines = req.getQueryParam("lines").toInt();
+                    if (num_lines == 0) num_lines = 20;
                 }
-
-                String log_tail = this->logger->tail(num_lines).c_str();
-                newClient.println("HTTP/1.1 200 OK");
-                newClient.println("Content-Type: text/plain");
-                newClient.println("Content-Length: " + String(utf8ByteLength(log_tail)));
-                newClient.println();
-                newClient.print(log_tail.c_str());
+                String log_tail = logger->tail(num_lines).c_str();
+                response.text(log_tail);
             }
         } else {
-            // No Handler for this request, respond with a 404 Not Found
-            newClient.println("HTTP/1.1 404 Not Found");
-            newClient.println("Content-Type: text/plain");
-            newClient.println("Content-Length: 0");
-            newClient.println();
+            // Not found
+            if (notFoundHandler) {
+                response = notFoundHandler(req);
+            } else {
+                response = generateErrorResponse(404, "Not Found");
+            }
         }
-
-        // Stop the client (clearing up resources and closing the connection - we're not supporting keep-alive)
-        newClient.stop();
+        
+        // Apply CORS headers
+        if (corsEnabled) {
+            applyCORS(response);
+        }
+        
+        // Add server header
+        if (!response.headers.count("Server")) {
+            response.setHeader("Server", serverName + "/" + serverVersion);
+        }
+        
+        // Send response
+        logResponse(response);
+        respondToClient(client, response);
+        
+        // Close connection
+        client.stop();
     }
 }
 
-void HttpServer::respondToClient(WiFiClient& newClient, HttpResponse& response) {
-    // Write the response to the client
-    newClient.println("HTTP/1.1 " + String(response.status));
-    for (std::map<String, String>::const_iterator it = response.headers.begin(); it != response.headers.end(); ++it) {
-        newClient.println(it->first + ": " + it->second);
+bool HttpServer::respondToClient(WiFiClient& client, HttpResponse& response) {
+    // Build status line
+    String statusLine = "HTTP/1.1 " + String(response.status) + " " + getStatusText(response.status);
+    client.println(statusLine);
+    
+    // Write headers
+    for (std::map<String, String>::const_iterator it = response.headers.begin(); 
+         it != response.headers.end(); ++it) {
+        client.print(it->first);
+        client.print(": ");
+        client.println(it->second);
     }
 
-    size_t bytes_written = 0;
+    // Calculate and send Content-Length
     size_t total_bytes = utf8ByteLength(response.body);
-    newClient.println("Content-Length: " + String(total_bytes));
-    newClient.println();
-    long start = millis();
-    size_t write_batch_length = 512;
-    while (bytes_written < total_bytes) {
-        size_t chunk_size = min(write_batch_length, total_bytes - bytes_written);
-        size_t written = newClient.write(response.body.c_str() + bytes_written, chunk_size);
-        if (written == 0) {
-            // Error writing to the socket - stop the client
-            if (this->logger) {
-                this->logger->println("Error writing response to HTTP client - will stop client");
+    client.print("Content-Length: ");
+    client.println(String(total_bytes));
+    client.println();
+    
+    // Send body in chunks
+    if (total_bytes > 0) {
+        size_t bytes_written = 0;
+        unsigned long start = millis();
+        
+        while (bytes_written < total_bytes) {
+            // Check timeout
+            if (millis() - start > WRITE_TIMEOUT_MS) {
+                if (logger) {
+                    logger->println("[HTTP] Write timeout");
+                }
+                return false;
             }
-            break;
-        }
-        bytes_written += written;
-
-        if (bytes_written == total_bytes) {
-            break;
-        }
-
-        if (millis() - start > 1000) { // Too long - give up - we don't want to waste time here writing to the socket - and 1s is already too long!!
-            if (this->logger) {
-                this->logger->println("Timeout writing response to HTTP client - will stop client");
+            
+            // Calculate chunk size
+            size_t remaining = total_bytes - bytes_written;
+            size_t chunk_size = (remaining < WRITE_CHUNK_SIZE) ? remaining : WRITE_CHUNK_SIZE;
+            
+            // Write chunk
+            size_t written = client.write(
+                reinterpret_cast<const uint8_t*>(response.body.c_str()) + bytes_written, 
+                chunk_size
+            );
+            
+            if (written == 0) {
+                if (logger) {
+                    logger->println("[HTTP] Write error");
+                }
+                return false;
             }
-            break;
+            
+            bytes_written += written;
+            
+            // Small yield to prevent watchdog issues
+            if (bytes_written < total_bytes) {
+                delay(1);
+            }
         }
     }
+    
+    return true;
 }
 
-HttpResponse::HttpResponse() {
-    this->status = 200;
-}
+// ============================================================================
+// HttpRequest Implementation
+// ============================================================================
 
 HttpRequest::HttpRequest() {
-    this->method = "GET";
-    this->path = "/";
-    this->body = "";
+    method = "GET";
+    path = "/";
+    body = "";
 }
 
-bool HttpRequest::jsonRequested() {
-    if (this->headers.find("accept") != this->headers.end()) {
-        String accepts = this->headers["accept"];
-        if (accepts.indexOf("application/json") != -1 || accepts.indexOf("json") != -1) {
+bool HttpRequest::jsonRequested() const {
+    // Check Accept header
+    String accept = getHeader("Accept");
+    if (accept.length() > 0) {
+        accept.toLowerCase();
+        if (accept.indexOf("application/json") != -1 || accept.indexOf("json") != -1) {
             return true;
         }
     }
-    if (this->query.find("json") != this->query.end()) {
-        String json = this->query["json"];
-        if (json == "true" || json == "1" || json == "json") {
+    
+    // Check query parameter
+    String jsonParam = getQueryParam("json");
+    if (jsonParam.length() > 0) {
+        jsonParam.toLowerCase();
+        if (jsonParam == "true" || jsonParam == "1" || jsonParam == "yes") {
             return true;
         }
     }
+    
     return false;
 }
 
+String HttpRequest::getHeader(const String &name, const String &defaultValue) const {
+    // Case-insensitive header lookup
+    String lowerName = name;
+    lowerName.toLowerCase();
+    
+    for (std::map<String, String>::const_iterator it = headers.begin(); it != headers.end(); ++it) {
+        String headerName = it->first;
+        headerName.toLowerCase();
+        if (headerName == lowerName) {
+            return it->second;
+        }
+    }
+    
+    return defaultValue;
+}
+
+String HttpRequest::getQueryParam(const String &name, const String &defaultValue) const {
+    std::map<String, String>::const_iterator it = query.find(name);
+    if (it != query.end()) {
+        return it->second;
+    }
+    return defaultValue;
+}
+
+bool HttpRequest::hasHeader(const String &name) const {
+    return getHeader(name, "").length() > 0;
+}
+
+bool HttpRequest::hasQueryParam(const String &name) const {
+    return query.find(name) != query.end();
+}
+
+String HttpRequest::getContentType() const {
+    return getHeader("Content-Type");
+}
+
+bool HttpRequest::isContentType(const String &contentType) const {
+    String ct = getContentType();
+    ct.toLowerCase();
+    String checkType = contentType;
+    checkType.toLowerCase();
+    return ct.indexOf(checkType) != -1;
+}
+
+// ============================================================================
+// HttpResponse Implementation
+// ============================================================================
+
+HttpResponse::HttpResponse() : status(200) {}
+
+HttpResponse::HttpResponse(int statusCode) : status(statusCode) {}
+
+HttpResponse::HttpResponse(int statusCode, const String &responseBody) 
+    : status(statusCode), body(responseBody) {}
+
+HttpResponse& HttpResponse::setStatus(int statusCode) {
+    status = statusCode;
+    return *this;
+}
+
+HttpResponse& HttpResponse::setBody(const String &content) {
+    body = content;
+    return *this;
+}
+
+HttpResponse& HttpResponse::setHeader(const String &name, const String &value) {
+    headers[name] = value;
+    return *this;
+}
+
+HttpResponse& HttpResponse::json(const String &jsonBody) {
+    body = jsonBody;
+    headers["Content-Type"] = "application/json";
+    return *this;
+}
+
+HttpResponse& HttpResponse::html(const String &htmlBody) {
+    body = htmlBody;
+    headers["Content-Type"] = "text/html; charset=utf-8";
+    return *this;
+}
+
+HttpResponse& HttpResponse::text(const String &textBody) {
+    body = textBody;
+    headers["Content-Type"] = "text/plain; charset=utf-8";
+    return *this;
+}
+
+HttpResponse& HttpResponse::cors(const String &origin) {
+    headers["Access-Control-Allow-Origin"] = origin;
+    headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS";
+    headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
+    return *this;
+}
+
+HttpResponse HttpResponse::redirect(const String &location, bool permanent) {
+    HttpResponse response(permanent ? 301 : 302);
+    response.setHeader("Location", location);
+    return response;
+}
+
+HttpResponse HttpResponse::error(int statusCode, const String &message) {
+    HttpResponse response(statusCode);
+    response.text(message);
+    return response;
+}
+
+// ============================================================================
+// WiFi Utility Functions
+// ============================================================================
 
 int wifiScan(Print* printer) {
     if (printer == nullptr) {
