@@ -2,6 +2,7 @@
 #include <memory_utils.hpp>
 #include <string_utils.hpp>
 #include "picohttpparser/picohttpparser.h"
+#include <esp_task_wdt.h>
 
 // ============================================================================
 // Client Connection Constants
@@ -239,6 +240,8 @@ void HttpServer::tick() {
     }
 
     WiFiClient newClient = server.accept();
+    esp_task_wdt_reset();   // Feed the watchdog
+
     if (newClient) {
         if (debug && logger) {
             logger->println("[HTTP] New client connected");
@@ -258,6 +261,7 @@ void HttpServer::tick() {
                 continue;
             }
             
+            esp_task_wdt_reset();   // Feed the watchdog
             if (!handleConnection(conn)) {
                 if (debug && logger) {
                     logger->println("[HTTP] Closing client connection after handling");
@@ -273,7 +277,7 @@ void HttpServer::tick() {
             connections.erase(connections.begin() + i);
         }
 
-        if (millis() - now > 64) {
+        if (millis() - now > 256) {
             break;  // Avoid blocking too long (we'll check remaining clients next tick)
         }
     }
