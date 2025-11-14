@@ -16,5 +16,8 @@
         "url": "https://github.com/demo-ninjas/hub-robot-http-utils"
     },
     "frameworks": ["arduino"],
-    "platforms": ["espressif32"]
+    "platforms": ["espressif32"],
+    "embed_files": [
+        "data/x509_crt_bundle"
+    ]
 }

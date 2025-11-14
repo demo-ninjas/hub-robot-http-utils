@@ -20,14 +20,14 @@
 
 // Forward declarations
 class HttpRequest;
-class HttpResponse;
+class HubHttpResponse;
 class HttpServer;
 
 // Type definitions for cleaner code
-typedef std::function<HttpResponse(HttpRequest &)> RouteHandler;
-typedef std::function<void(HttpRequest &, HttpResponse &)> MiddlewareHandler; // legacy (always continue)
-typedef std::function<bool(HttpRequest &, HttpResponse &)> MiddlewareHandlerBool; // return false to short-circuit
-typedef std::function<HttpResponse(int, const String &)> ErrorHandler;
+typedef std::function<HubHttpResponse(HttpRequest &)> RouteHandler;
+typedef std::function<void(HttpRequest &, HubHttpResponse &)> MiddlewareHandler; // legacy (always continue)
+typedef std::function<bool(HttpRequest &, HubHttpResponse &)> MiddlewareHandlerBool; // return false to short-circuit
+typedef std::function<HubHttpResponse(int, const String &)> ErrorHandler;
 
 /**
  * @brief Represents an HTTP request with method, path, headers, query params and body
@@ -97,29 +97,29 @@ public:
 /**
  * @brief Represents an HTTP response with status code, headers and body
  */
-class HttpResponse {
+class HubHttpResponse {
 public:
     int status;
     String body;
     std::map<String, String> headers;
     
-    HttpResponse();
-    explicit HttpResponse(int statusCode);
-    HttpResponse(int statusCode, const String &body);
+    HubHttpResponse();
+    explicit HubHttpResponse(int statusCode);
+    HubHttpResponse(int statusCode, const String &body);
     
     /**
      * @brief Set response status code
      * @param statusCode HTTP status code (e.g., 200, 404, 500)
      * @return Reference to this response (for chaining)
      */
-    HttpResponse& setStatus(int statusCode);
+    HubHttpResponse& setStatus(int statusCode);
     
     /**
      * @brief Set response body
      * @param content Body content
      * @return Reference to this response (for chaining)
      */
-    HttpResponse& setBody(const String &content);
+    HubHttpResponse& setBody(const String &content);
     
     /**
      * @brief Set a response header
@@ -127,35 +127,35 @@ public:
      * @param value Header value
      * @return Reference to this response (for chaining)
      */
-    HttpResponse& setHeader(const String &name, const String &value);
+    HubHttpResponse& setHeader(const String &name, const String &value);
     
     /**
      * @brief Set JSON response with appropriate Content-Type header
      * @param json JSON string
      * @return Reference to this response (for chaining)
      */
-    HttpResponse& json(const String &jsonBody);
+    HubHttpResponse& json(const String &jsonBody);
     
     /**
      * @brief Set HTML response with appropriate Content-Type header
      * @param html HTML string
      * @return Reference to this response (for chaining)
      */
-    HttpResponse& html(const String &htmlBody);
+    HubHttpResponse& html(const String &htmlBody);
     
     /**
      * @brief Set plain text response with appropriate Content-Type header
      * @param text Plain text string
      * @return Reference to this response (for chaining)
      */
-    HttpResponse& text(const String &textBody);
+    HubHttpResponse& text(const String &textBody);
     
     /**
      * @brief Enable CORS for this response
      * @param origin Allowed origin (default: "*")
      * @return Reference to this response (for chaining)
      */
-    HttpResponse& cors(const String &origin = "*");
+    HubHttpResponse& cors(const String &origin = "*");
     
     /**
      * @brief Create a redirect response
@@ -163,7 +163,7 @@ public:
      * @param permanent Use 301 instead of 302
      * @return Redirect response
      */
-    static HttpResponse redirect(const String &location, bool permanent = false);
+    static HubHttpResponse redirect(const String &location, bool permanent = false);
     
     /**
      * @brief Create a JSON error response
@@ -171,7 +171,7 @@ public:
      * @param message Error message
      * @return Error response
      */
-    static HttpResponse error(int statusCode, const String &message);
+    static HubHttpResponse error(int statusCode, const String &message);
 };
 
 class HttpClientConnection {
@@ -353,7 +353,7 @@ public:
     void addDefaultHeader(const String &name, const String &value);
     void removeDefaultHeader(const String &name);
     void clearDefaultHeaders();
-    void onBeforeSend(std::function<void(HttpRequest &, HttpResponse &)> finalizer);
+    void onBeforeSend(std::function<void(HttpRequest &, HubHttpResponse &)> finalizer);
 
 private:
     // Configuration
@@ -382,19 +382,19 @@ private:
     ErrorHandler errorHandler;
     std::vector<std::unique_ptr<HttpClientConnection>> connections;
     std::map<String, String> defaultHeaders;
-    std::function<void(HttpRequest &, HttpResponse &)> beforeSendHook;
+    std::function<void(HttpRequest &, HubHttpResponse &)> beforeSendHook;
     
     // Internal methods
     bool handleConnection(HttpClientConnection* connection);
-    bool respondToClient(WiFiClient &client, HttpResponse &response);
-    HttpResponse generateErrorResponse(int statusCode, const String &message);
-    void applyCORS(HttpResponse &response);
-    void applyMiddlewares(HttpRequest &req, HttpResponse &response);
-    void applyDefaultHeaders(HttpResponse &response);
+    bool respondToClient(WiFiClient &client, HubHttpResponse &response);
+    HubHttpResponse generateErrorResponse(int statusCode, const String &message);
+    void applyCORS(HubHttpResponse &response);
+    void applyMiddlewares(HttpRequest &req, HubHttpResponse &response);
+    void applyDefaultHeaders(HubHttpResponse &response);
     bool parseHeaders(HttpRequest &req, const String &method, const String &path);
     String getStatusText(int statusCode);
     void logRequest(const HttpRequest &req);
-    void logResponse(const HttpResponse &response);
+    void logResponse(const HubHttpResponse &response);
     String toLowerCase(const String &str) const;
     bool hasEnoughMemory() const;
     bool matchPattern(const RoutePattern &rp, const String &method, const String &path, HttpRequest &req);

@@ -7,6 +7,12 @@ arduino_secrets.h
 .vscode/launch.json
 .vscode/settings.json
 
+## Ignore the raw CA bundle data - it can be generated
+data/ca-bundle.crt
+data/certdata.txt
+data/.venv/
+
+
 ## Ignore test project
 src/main.cpp
 boards/

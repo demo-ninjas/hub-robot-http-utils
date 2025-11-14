@@ -119,7 +119,7 @@ void HttpServer::on(const String &method, const String &path, RouteHandler handl
 
 void HttpServer::use(MiddlewareHandler middleware) {
     // Wrap the legacy middleware to return true always
-    MiddlewareHandlerBool wrapped = [middleware](HttpRequest &req, HttpResponse &res) {
+    MiddlewareHandlerBool wrapped = [middleware](HttpRequest &req, HubHttpResponse &res) {
         middleware(req, res);
         return true; // always continue
     };
@@ -230,7 +230,7 @@ void HttpServer::clearDefaultHeaders() {
     defaultHeaders.clear();
 }
 
-void HttpServer::onBeforeSend(std::function<void(HttpRequest &, HttpResponse &)> finalizer) {
+void HttpServer::onBeforeSend(std::function<void(HttpRequest &, HubHttpResponse &)> finalizer) {
     beforeSendHook = finalizer;
 }
 
@@ -293,7 +293,7 @@ String HttpServer::toLowerCase(const String &str) const {
     return result;
 }
 
-void HttpServer::applyCORS(HttpResponse &response) {
+void HttpServer::applyCORS(HubHttpResponse &response) {
     if (!corsEnabled) {
         return;
     }
@@ -304,7 +304,7 @@ void HttpServer::applyCORS(HttpResponse &response) {
     response.setHeader("Access-Control-Max-Age", "86400");
 }
 
-void HttpServer::applyMiddlewares(HttpRequest &req, HttpResponse &response) {
+void HttpServer::applyMiddlewares(HttpRequest &req, HubHttpResponse &response) {
     for (size_t i = 0; i < middlewares.size(); i++) {
         if (!middlewares[i](req, response)) {
             break; // short-circuit
@@ -312,7 +312,7 @@ void HttpServer::applyMiddlewares(HttpRequest &req, HttpResponse &response) {
     }
 }
 
-void HttpServer::applyDefaultHeaders(HttpResponse &response) {
+void HttpServer::applyDefaultHeaders(HubHttpResponse &response) {
     for (std::map<String,String>::const_iterator it = defaultHeaders.begin(); it != defaultHeaders.end(); ++it) {
         if (!response.headers.count(it->first)) {
             response.setHeader(it->first, it->second);
@@ -320,12 +320,12 @@ void HttpServer::applyDefaultHeaders(HttpResponse &response) {
     }
 }
 
-HttpResponse HttpServer::generateErrorResponse(int statusCode, const String &message) {
+HubHttpResponse HttpServer::generateErrorResponse(int statusCode, const String &message) {
     if (errorHandler) {
         return errorHandler(statusCode, message);
     }
     
-    HttpResponse response(statusCode);
+    HubHttpResponse response(statusCode);
     response.setHeader("Content-Type", "text/plain");
     response.setBody(message);
     return response;
@@ -394,7 +394,7 @@ void HttpServer::logRequest(const HttpRequest &req) {
     }
 }
 
-void HttpServer::logResponse(const HttpResponse &response) {
+void HttpServer::logResponse(const HubHttpResponse &response) {
     if (!debug || !logger) {
         return;
     }
@@ -412,7 +412,7 @@ bool HttpServer::handleConnection(HttpClientConnection* connection) {
         if (logger) {
             logger->println("[HTTP] Insufficient memory for new client");
         }
-        HttpResponse response = generateErrorResponse(503, "Service Unavailable");
+        HubHttpResponse response = generateErrorResponse(503, "Service Unavailable");
         respondToClient(connection->getClient(), response);
         return false;   // Done with this client connection - it can be closed
     }
@@ -444,7 +444,7 @@ bool HttpServer::handleConnection(HttpClientConnection* connection) {
                 if (logger) {
                     logger->println("[HTTP] Request too large");
                 }
-                HttpResponse response = generateErrorResponse(413, "Payload Too Large");
+                HubHttpResponse response = generateErrorResponse(413, "Payload Too Large");
                 respondToClient(client, response);
                 return false;
             }
@@ -468,7 +468,7 @@ bool HttpServer::handleConnection(HttpClientConnection* connection) {
                 if (logger) {
                     logger->println("[HTTP] Request exceeds max size");
                 }
-                HttpResponse response = generateErrorResponse(413, "Payload Too Large");
+                HubHttpResponse response = generateErrorResponse(413, "Payload Too Large");
                 respondToClient(client, response);
                 return false;
             }
@@ -497,7 +497,7 @@ bool HttpServer::handleConnection(HttpClientConnection* connection) {
                 if (logger) {
                     logger->println("[HTTP] Parse error");
                 }
-                HttpResponse response = generateErrorResponse(400, "Bad Request");
+                HubHttpResponse response = generateErrorResponse(400, "Bad Request");
                 respondToClient(client, response);
                 return false;
             } else if (parse_result == -2) {
@@ -566,7 +566,7 @@ bool HttpServer::handleConnection(HttpClientConnection* connection) {
         logRequest(req);
 
         // Create response
-        HttpResponse response;
+        HubHttpResponse response;
         
         // Handle OPTIONS for CORS preflight
         if (corsEnabled && req.method == "OPTIONS") {
@@ -668,7 +668,7 @@ bool HttpServer::handleConnection(HttpClientConnection* connection) {
     return true;
 }
 
-bool HttpServer::respondToClient(WiFiClient& client, HttpResponse& response) {
+bool HttpServer::respondToClient(WiFiClient& client, HubHttpResponse& response) {
     // Build status line
     String statusLine = "HTTP/1.1 " + String(response.status) + " " + getStatusText(response.status);
     client.println(statusLine);
@@ -830,61 +830,61 @@ bool HttpRequest::isContentType(const String &contentType) const {
 // HttpResponse Implementation
 // ============================================================================
 
-HttpResponse::HttpResponse() : status(200) {}
+HubHttpResponse::HubHttpResponse() : status(200) {}
 
-HttpResponse::HttpResponse(int statusCode) : status(statusCode) {}
+HubHttpResponse::HubHttpResponse(int statusCode) : status(statusCode) {}
 
-HttpResponse::HttpResponse(int statusCode, const String &responseBody) 
+HubHttpResponse::HubHttpResponse(int statusCode, const String &responseBody) 
     : status(statusCode), body(responseBody) {}
 
-HttpResponse& HttpResponse::setStatus(int statusCode) {
+HubHttpResponse& HubHttpResponse::setStatus(int statusCode) {
     status = statusCode;
     return *this;
 }
 
-HttpResponse& HttpResponse::setBody(const String &content) {
+HubHttpResponse& HubHttpResponse::setBody(const String &content) {
     body = content;
     return *this;
 }
 
-HttpResponse& HttpResponse::setHeader(const String &name, const String &value) {
+HubHttpResponse& HubHttpResponse::setHeader(const String &name, const String &value) {
     headers[name] = value;
     return *this;
 }
 
-HttpResponse& HttpResponse::json(const String &jsonBody) {
+HubHttpResponse& HubHttpResponse::json(const String &jsonBody) {
     body = jsonBody;
     headers["Content-Type"] = "application/json";
     return *this;
 }
 
-HttpResponse& HttpResponse::html(const String &htmlBody) {
+HubHttpResponse& HubHttpResponse::html(const String &htmlBody) {
     body = htmlBody;
     headers["Content-Type"] = "text/html; charset=utf-8";
     return *this;
 }
 
-HttpResponse& HttpResponse::text(const String &textBody) {
+HubHttpResponse& HubHttpResponse::text(const String &textBody) {
     body = textBody;
     headers["Content-Type"] = "text/plain; charset=utf-8";
     return *this;
 }
 
-HttpResponse& HttpResponse::cors(const String &origin) {
+HubHttpResponse& HubHttpResponse::cors(const String &origin) {
     headers["Access-Control-Allow-Origin"] = origin;
     headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS";
     headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
     return *this;
 }
 
-HttpResponse HttpResponse::redirect(const String &location, bool permanent) {
-    HttpResponse response(permanent ? 301 : 302);
+HubHttpResponse HubHttpResponse::redirect(const String &location, bool permanent) {
+    HubHttpResponse response(permanent ? 301 : 302);
     response.setHeader("Location", location);
     return response;
 }
 
-HttpResponse HttpResponse::error(int statusCode, const String &message) {
-    HttpResponse response(statusCode);
+HubHttpResponse HubHttpResponse::error(int statusCode, const String &message) {
+    HubHttpResponse response(statusCode);
     response.text(message);
     return response;
 }
